@@ -1,0 +1,42 @@
+name: Daily Shopify Inventory Updates
+
+on:
+  #schedule:
+  #  - cron: '0 2 * * *'  # runs every day at 2 AM UTC
+  #workflow_dispatch:
+
+jobs:
+  update_inventory:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas chardet selenium webdriver-manager
+
+      - name: Run Selenium to Shopify updater
+        run: python seleniumToShopifyUpdater.py
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+
+      - name: Run second inventory script
+        run: python secondStockUpdater.py
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FILENAME: ${{ secrets.FILENAME }}
