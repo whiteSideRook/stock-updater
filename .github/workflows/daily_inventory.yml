@@ -5,7 +5,6 @@ on:
     - cron: '0 2 * * *'  # runs every day at 2 AM UTC
   workflow_dispatch:
 
-
 jobs:
   update_inventory:
     runs-on: ubuntu-latest
