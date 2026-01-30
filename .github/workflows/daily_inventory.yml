@@ -2,7 +2,7 @@ name: Daily Shopify Inventory Updates
 
 on:
   schedule:
-    - cron: '0 9 * * *' # AM
+    - cron: '15 9 * * *' # AM
   workflow_dispatch:
 
 jobs:
