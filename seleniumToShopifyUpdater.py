@@ -82,13 +82,29 @@ def download_latest_file():
             EC.presence_of_element_located((By.ID, "files-datatable_data"))
         )
 
-        mod_header = WebDriverWait(driver, 10).until(
+        wait = WebDriverWait(driver, 20)
+
+        # wait for table
+        table = wait.until(
+            EC.presence_of_element_located((By.ID, "files-datatable_data"))
+        )
+
+        # wait for ajax overlay to disappear
+        wait.until(
+            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui"))
+        )
+
+        mod_header = wait.until(
             EC.element_to_be_clickable((By.ID, "files-datatable:j_idt156"))
         )
-        mod_header.click()
-        time.sleep(0.3)
-        mod_header.click()
-        time.sleep(0.8)
+
+        driver.execute_script("arguments[0].click();", mod_header)
+
+        wait.until(
+            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui"))
+        )
+
+        driver.execute_script("arguments[0].click();", mod_header)
 
         first_row = table.find_element(By.CSS_SELECTOR, "tr")
         link = first_row.find_element(By.CSS_SELECTOR, ".filename-column a")
