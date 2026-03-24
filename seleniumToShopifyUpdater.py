@@ -98,13 +98,31 @@ def download_latest_file():
             EC.element_to_be_clickable((By.ID, "files-datatable:j_idt156"))
         )
 
-        driver.execute_script("arguments[0].click();", mod_header)
-
-        wait.until(
-            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui"))
-        )
+        # --- FIRST CLICK ---
+        first_row = table.find_element(By.CSS_SELECTOR, "tr")
+        first_name_before = first_row.find_element(By.CSS_SELECTOR, ".filename-column a").text
 
         driver.execute_script("arguments[0].click();", mod_header)
+
+        # wait for first sort to complete (table changes)
+        wait.until(lambda d: (
+            table.find_element(By.CSS_SELECTOR, "tr")
+            .find_element(By.CSS_SELECTOR, ".filename-column a")
+            .text != first_name_before
+        ))
+
+        # --- SECOND CLICK ---
+        first_row = table.find_element(By.CSS_SELECTOR, "tr")
+        first_name_before = first_row.find_element(By.CSS_SELECTOR, ".filename-column a").text
+
+        driver.execute_script("arguments[0].click();", mod_header)
+
+        # wait for second sort to complete
+        wait.until(lambda d: (
+            table.find_element(By.CSS_SELECTOR, "tr")
+            .find_element(By.CSS_SELECTOR, ".filename-column a")
+            .text != first_name_before
+        ))
 
         first_row = table.find_element(By.CSS_SELECTOR, "tr")
         link = first_row.find_element(By.CSS_SELECTOR, ".filename-column a")
