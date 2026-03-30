@@ -65,12 +65,21 @@ def setup_driver():
 
 # === DOWNLOAD ===
 def download_latest_file():
+    from selenium.common.exceptions import StaleElementReferenceException
+
     driver = setup_driver()
 
     try:
         driver.get(APP_URL)
 
-        password_input = WebDriverWait(driver, 10).until(
+        wait = WebDriverWait(
+            driver,
+            20,
+            ignored_exceptions=(StaleElementReferenceException,)
+        )
+
+        # --- LOGIN ---
+        password_input = wait.until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
         )
         password_input.send_keys(APP_PASSWORD)
@@ -78,60 +87,74 @@ def download_latest_file():
         submit_btn = driver.find_element(By.CSS_SELECTOR, "button, input[type='submit']")
         submit_btn.click()
 
-        table = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "files-datatable_data"))
-        )
-
-        wait = WebDriverWait(driver, 20)
-
-        # wait for table
-        table = wait.until(
-            EC.presence_of_element_located((By.ID, "files-datatable_data"))
-        )
+        # --- WAIT FOR TABLE ---
+        wait.until(EC.presence_of_element_located((By.ID, "files-datatable_data")))
 
         # wait for ajax overlay to disappear
         wait.until(
             EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui"))
         )
 
+        # --- SORT BUTTON ---
         mod_header = wait.until(
             EC.element_to_be_clickable((By.ID, "files-datatable:j_idt156"))
         )
 
-        # --- FIRST CLICK ---
-        first_row = table.find_element(By.CSS_SELECTOR, "tr")
-        first_name_before = first_row.find_element(By.CSS_SELECTOR, ".filename-column a").text
+        # --- FIRST SORT CLICK ---
+        first_name_before = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "#files-datatable_data tr .filename-column a")
+            )
+        ).text
 
         driver.execute_script("arguments[0].click();", mod_header)
 
-        # wait for first sort to complete (table changes)
         wait.until(lambda d: (
-            table.find_element(By.CSS_SELECTOR, "tr")
-            .find_element(By.CSS_SELECTOR, ".filename-column a")
-            .text != first_name_before
+            d.find_element(
+                By.CSS_SELECTOR,
+                "#files-datatable_data tr .filename-column a"
+            ).text != first_name_before
         ))
 
-        # --- SECOND CLICK ---
-        first_row = table.find_element(By.CSS_SELECTOR, "tr")
-        first_name_before = first_row.find_element(By.CSS_SELECTOR, ".filename-column a").text
+        # --- SECOND SORT CLICK ---
+        first_name_before = driver.find_element(
+            By.CSS_SELECTOR,
+            "#files-datatable_data tr .filename-column a"
+        ).text
 
         driver.execute_script("arguments[0].click();", mod_header)
 
-        # wait for second sort to complete
         wait.until(lambda d: (
-            table.find_element(By.CSS_SELECTOR, "tr")
-            .find_element(By.CSS_SELECTOR, ".filename-column a")
-            .text != first_name_before
+            d.find_element(
+                By.CSS_SELECTOR,
+                "#files-datatable_data tr .filename-column a"
+            ).text != first_name_before
         ))
 
-        first_row = table.find_element(By.CSS_SELECTOR, "tr")
+        # --- GET FIRST ROW ---
+        first_row = driver.find_element(
+            By.CSS_SELECTOR,
+            "#files-datatable_data tr"
+        )
+
         link = first_row.find_element(By.CSS_SELECTOR, ".filename-column a")
-        filename = (link.get_attribute("aria-label") or link.get_attribute("title") or "").strip()
+
+        filename = (
+            link.get_attribute("aria-label")
+            or link.get_attribute("title")
+            or link.text
+            or ""
+        ).strip()
 
         if not filename.startswith("PDT_DISPO_"):
-            raise Exception("Latest file is not PDT_DISPO")
+            raise Exception(f"Latest file is not PDT_DISPO (got: {filename})")
 
-        download_button = first_row.find_element(By.CSS_SELECTOR, "button[title='Télécharger']")
+        # --- DOWNLOAD ---
+        download_button = first_row.find_element(
+            By.CSS_SELECTOR,
+            "button[title*='Télé']"
+        )
+
         driver.execute_script("arguments[0].click();", download_button)
 
         print(f"Downloading: {filename}")
@@ -147,7 +170,6 @@ def download_latest_file():
 
     finally:
         driver.quit()
-
 
 # === SHOPIFY HELPERS ===
 def get_location_id():
