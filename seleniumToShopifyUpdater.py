@@ -363,35 +363,6 @@ def find_skus_to_unpublish(inventory_map, updates, producer_name):
     print(f"Products to unpublish: {len({x['productId'] for x in to_unpublish})}")
     return to_unpublish
 
-
-def find_skus_to_republish(inventory_map, updates, producer_name):
-    supplier_skus = {u["sku"] for u in updates}
-    producer_brands = get_brands_for_producer(producer_name)
-
-    to_republish = []
-
-    for sku in supplier_skus:
-        if sku not in inventory_map:
-            continue
-
-        data = inventory_map[sku]
-        vendor = (data.get("vendor") or "").upper()
-
-        if vendor not in producer_brands:
-            continue
-
-        # 👇 ONLY republish if currently unpublished
-        if data.get("published"):
-            continue
-
-        to_republish.append({
-            "sku": sku,
-            "productId": data["productId"]
-        })
-
-    print(f"Products to republish: {len({x['productId'] for x in to_republish})}")
-    return to_republish
-
 # === UPDATE ===
 MUTATION = """
 mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
@@ -462,14 +433,6 @@ mutation publishableUnpublish($id: ID!, $input: [PublicationInput!]!) {
 }
 """
 
-PUBLISH_MUTATION = """
-mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
-  publishablePublish(id: $id, input: $input) {
-    userErrors { field message }
-  }
-}
-"""
-
 
 def unpublish_products(items, publication_id):
     seen = set()
@@ -495,31 +458,6 @@ def unpublish_products(items, publication_id):
 
     print(f"Unpublished {len(seen)} products.")
 
-
-def publish_products(items, publication_id):
-    seen = set()
-
-    for item in items:
-        pid = item["productId"]
-        if pid in seen:
-            continue
-        seen.add(pid)
-
-        variables = {
-            "id": pid,
-            "input": [{"publicationId": publication_id}]
-        }
-
-        r = requests.post(
-            API_GRAPHQL,
-            headers=HEADERS_GRAPHQL,
-            json={"query": PUBLISH_MUTATION, "variables": variables}
-        )
-        r.raise_for_status()
-        time.sleep(0.3)
-
-    print(f"Republished {len(seen)} products.")
-
 # === MAIN ===
 def main():
     downloaded_file = download_latest_file()
@@ -543,7 +481,6 @@ def main():
 
     # === NEW LOGIC ===
     to_unpublish = find_skus_to_unpublish(inventory_map, updates, PRODUCER)
-    to_republish = find_skus_to_republish(inventory_map, updates, PRODUCER)
 
     # SAFE TEST MODE (no API calls)
     print("TEST MODE: no publish changes applied")
@@ -551,9 +488,6 @@ def main():
     # === ENABLE BELOW AFTER VERIFYING COUNTS ===
     # if to_unpublish:
     #     unpublish_products(to_unpublish, publication_id)
-    #
-    # if to_republish:
-    #     publish_products(to_republish, publication_id)
 
 
 if __name__ == "__main__":
