@@ -14,6 +14,41 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
+# === PRODUCER CONFIG ===
+PRODUCER = "Ekkia"
+
+BRAND_TO_PRODUCER = {
+    "ABSORBINE": "Ekkia",
+    "BORSTIQ": "Ekkia",
+    "CARR & DAY MARTIN": "Ekkia",
+    "CHOPLIN": "Ekkia",
+    "EDEN BY PENELOPE": "Ekkia",
+    "EFFAX": "Ekkia",
+    "EQUI-KIDS": "Ekkia",
+    "EQUITHEME": "Ekkia",
+    "ERIC THOMAS": "Ekkia",
+    "FEELING": "Ekkia",
+    "HEINIGER": "Ekkia",
+    "LEOVET": "Ekkia",
+    "NACA": "Ekkia",
+    "NAF": "Ekkia",
+    "NORTON": "Ekkia",
+    "PADDOCK": "Ekkia",
+    "PENELOPE": "Ekkia",
+    "PENELOPE COLLECTIONS": "Ekkia",
+    "RIDING WORLD": "Ekkia",
+    "FLECK": "Ekkia",
+    "LISTER": "Ekkia",
+    "PADDOCK SPORTS": "Ekkia"
+}
+
+
+def get_brands_for_producer(producer_name):
+    return {
+        brand.upper()
+        for brand, producer in BRAND_TO_PRODUCER.items()
+        if producer == producer_name
+    }
 
 def require_env(name: str) -> str:
     value = os.getenv(name)
@@ -202,7 +237,10 @@ def fetch_inventory_items():
             pageInfo { hasNextPage endCursor }
             edges {
               node {
+                id
                 title
+                vendor
+                publishedOnCurrentPublication
                 variants(first:100) {
                   edges {
                     node { sku inventoryItem { id } }
@@ -226,7 +264,10 @@ def fetch_inventory_items():
                 if sku:
                     inventory_map[sku.strip()] = {
                         "inventoryItemId": inv_id,
-                        "title": edge["node"]["title"]
+                        "productId": edge["node"]["id"],
+                        "title": edge["node"]["title"],
+                        "vendor": edge["node"]["vendor"],
+                        "published": edge["node"]["publishedOnCurrentPublication"]
                     }
 
         page = data["data"]["products"]["pageInfo"]
@@ -282,6 +323,55 @@ def read_csv(input_file, valid_skus):
     print(f"Prepared {len(updates)} updates, skipped {skipped}.")
     return updates
 
+def find_skus_to_unpublish(inventory_map, updates, producer_name):
+    supplier_skus = {u["sku"] for u in updates}
+    producer_brands = get_brands_for_producer(producer_name)
+
+    to_unpublish = []
+
+    for sku, data in inventory_map.items():
+        vendor = (data.get("vendor") or "").upper()
+
+        if vendor not in producer_brands:
+            continue
+
+        if sku not in supplier_skus:
+            to_unpublish.append({
+                "sku": sku,
+                "productId": data["productId"]
+            })
+
+    print(f"Products to unpublish: {len({x['productId'] for x in to_unpublish})}")
+    return to_unpublish
+
+
+def find_skus_to_republish(inventory_map, updates, producer_name):
+    supplier_skus = {u["sku"] for u in updates}
+    producer_brands = get_brands_for_producer(producer_name)
+
+    to_republish = []
+
+    for sku in supplier_skus:
+        if sku not in inventory_map:
+            continue
+
+        data = inventory_map[sku]
+        vendor = (data.get("vendor") or "").upper()
+
+        if vendor not in producer_brands:
+            continue
+
+        # 👇 ONLY republish if currently unpublished
+        if data.get("published"):
+            continue
+
+        to_republish.append({
+            "sku": sku,
+            "productId": data["productId"]
+        })
+
+    print(f"Products to republish: {len({x['productId'] for x in to_republish})}")
+    return to_republish
 
 # === UPDATE ===
 MUTATION = """
@@ -321,6 +411,95 @@ def update_inventory(updates, location_gid, batch_size=250):
 
     print(f"Inventory update complete for {len(updates)} items.")
 
+def get_online_store_publication_id():
+    query = """
+    {
+      publications(first: 10) {
+        edges {
+          node {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+
+    r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL, json={"query": query})
+    r.raise_for_status()
+    data = r.json()
+
+    for edge in data["data"]["publications"]["edges"]:
+        if "Online Store" in edge["node"]["name"]:
+            return edge["node"]["id"]
+
+    raise Exception("Online Store publication not found")
+
+UNPUBLISH_MUTATION = """
+mutation publishableUnpublish($id: ID!, $input: [PublicationInput!]!) {
+  publishableUnpublish(id: $id, input: $input) {
+    userErrors { field message }
+  }
+}
+"""
+
+PUBLISH_MUTATION = """
+mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+  publishablePublish(id: $id, input: $input) {
+    userErrors { field message }
+  }
+}
+"""
+
+
+def unpublish_products(items, publication_id):
+    seen = set()
+
+    for item in items:
+        pid = item["productId"]
+        if pid in seen:
+            continue
+        seen.add(pid)
+
+        variables = {
+            "id": pid,
+            "input": [{"publicationId": publication_id}]
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": UNPUBLISH_MUTATION, "variables": variables}
+        )
+        r.raise_for_status()
+        time.sleep(0.3)
+
+    print(f"Unpublished {len(seen)} products.")
+
+
+def publish_products(items, publication_id):
+    seen = set()
+
+    for item in items:
+        pid = item["productId"]
+        if pid in seen:
+            continue
+        seen.add(pid)
+
+        variables = {
+            "id": pid,
+            "input": [{"publicationId": publication_id}]
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": PUBLISH_MUTATION, "variables": variables}
+        )
+        r.raise_for_status()
+        time.sleep(0.3)
+
+    print(f"Republished {len(seen)} products.")
 
 # === MAIN ===
 def main():
@@ -328,13 +507,34 @@ def main():
     print(f"Using file: {downloaded_file}")
 
     location_gid = get_location_id()
+    publication_id = get_online_store_publication_id()
+
     inventory_map = fetch_inventory_items()
     updates = read_csv(downloaded_file, inventory_map)
+
+    # 🚨 SAFETY CHECK
+    if len(updates) < 2000:
+        print("ABORT: too few updates, possible supplier error")
+        return
 
     if updates:
         update_inventory(updates, location_gid)
     else:
         print("No SKUs to update.")
+
+    # === NEW LOGIC ===
+    to_unpublish = find_skus_to_unpublish(inventory_map, updates, PRODUCER)
+    to_republish = find_skus_to_republish(inventory_map, updates, PRODUCER)
+
+    # SAFE TEST MODE (no API calls)
+    print("TEST MODE: no publish changes applied")
+
+    # === ENABLE BELOW AFTER VERIFYING COUNTS ===
+    # if to_unpublish:
+    #     unpublish_products(to_unpublish, publication_id)
+    #
+    # if to_republish:
+    #     publish_products(to_republish, publication_id)
 
 
 if __name__ == "__main__":
