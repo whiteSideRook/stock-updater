@@ -257,6 +257,11 @@ def fetch_inventory_items():
         r.raise_for_status()
         data = r.json()
 
+        if not data.get("data"):
+            print("GRAPHQL FAILED RESPONSE:")
+            print(data)
+            raise Exception("Shopify returned null data (auth/scope issue)")
+
         for edge in data["data"]["products"]["edges"]:
             for v in edge["node"]["variants"]["edges"]:
                 sku = v["node"]["sku"]
