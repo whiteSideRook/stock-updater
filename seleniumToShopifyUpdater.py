@@ -131,26 +131,40 @@ def download_latest_file():
             ).text != first_name_before
         ))
 
-        # --- GET FIRST ROW ---
-        first_row = driver.find_element(
-            By.CSS_SELECTOR,
-            "#files-datatable_data tr"
-        )
+        # ------------------------------------------------------------
+        # FIXED PART: scan top 10 rows instead of trusting row 1
+        # ------------------------------------------------------------
+        rows = driver.find_elements(By.CSS_SELECTOR, "#files-datatable_data tr")
 
-        link = first_row.find_element(By.CSS_SELECTOR, ".filename-column a")
+        filename = None
+        target_row = None
 
-        filename = (
-            link.get_attribute("aria-label")
-            or link.get_attribute("title")
-            or link.text
-            or ""
-        ).strip()
+        for row in rows[:10]:
+            try:
+                link = row.find_element(By.CSS_SELECTOR, ".filename-column a")
 
-        if not filename.startswith("PDT_DISPO_"):
-            raise Exception(f"Latest file is not PDT_DISPO (got: {filename})")
+                name = (
+                    link.get_attribute("aria-label")
+                    or link.get_attribute("title")
+                    or link.text
+                    or ""
+                ).strip()
+
+                if name.startswith("PDT_DISPO_"):
+                    filename = name
+                    target_row = row
+                    break
+
+            except Exception:
+                continue
+
+        if not filename or not target_row:
+            raise Exception("No PDT_DISPO file found in top 10 rows")
+
+        print(f"Selected file: {filename}")
 
         # --- DOWNLOAD ---
-        download_button = first_row.find_element(
+        download_button = target_row.find_element(
             By.CSS_SELECTOR,
             "button[title*='Télé']"
         )
@@ -170,6 +184,7 @@ def download_latest_file():
 
     finally:
         driver.quit()
+
 
 # === SHOPIFY HELPERS ===
 def get_location_id():
