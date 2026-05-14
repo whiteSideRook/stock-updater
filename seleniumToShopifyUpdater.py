@@ -342,27 +342,6 @@ def read_csv(input_file, valid_skus):
     print(f"Prepared {len(updates)} updates, skipped {skipped}.")
     return updates
 
-def find_skus_to_unpublish(inventory_map, updates, producer_name):
-    supplier_skus = {u["sku"] for u in updates}
-    producer_brands = get_brands_for_producer(producer_name)
-
-    to_unpublish = []
-
-    for sku, data in inventory_map.items():
-        vendor = (data.get("vendor") or "").upper()
-
-        if vendor not in producer_brands:
-            continue
-
-        if sku not in supplier_skus:
-            to_unpublish.append({
-                "sku": sku,
-                "productId": data["productId"]
-            })
-
-    print(f"Products to unpublish: {len({x['productId'] for x in to_unpublish})}")
-    return to_unpublish
-
 # === UPDATE ===
 MUTATION = """
 mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
@@ -371,6 +350,71 @@ mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
   }
 }
 """
+
+ARCHIVE_MUTATION = """
+mutation productArchive($input: ProductInput!) {
+  productUpdate(input: $input) {
+    product {
+      id
+      status
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""
+
+def archive_products(items):
+    seen = set()
+
+    for item in items:
+        pid = item["productId"]
+
+        if pid in seen:
+            continue
+        seen.add(pid)
+
+        variables = {
+            "input": {
+                "id": pid,
+                "status": "ARCHIVED"
+            }
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": ARCHIVE_MUTATION, "variables": variables}
+        )
+
+        r.raise_for_status()
+        time.sleep(0.3)
+
+    print(f"Archived {len(seen)} products.")
+
+
+def find_skus_to_archive(inventory_map, updates, producer_name):
+    supplier_skus = {u["sku"] for u in updates}
+    producer_brands = get_brands_for_producer(producer_name)
+
+    to_archive = []
+
+    for sku, data in inventory_map.items():
+        vendor = (data.get("vendor") or "").upper()
+
+        if vendor not in producer_brands:
+            continue
+
+        if sku not in supplier_skus:
+            to_archive.append({
+                "sku": sku,
+                "productId": data["productId"]
+            })
+
+    print(f"Products to archive: {len({x['productId'] for x in to_archive})}")
+    return to_archive
 
 
 def update_inventory(updates, location_gid, batch_size=250):
@@ -401,62 +445,8 @@ def update_inventory(updates, location_gid, batch_size=250):
 
     print(f"Inventory update complete for {len(updates)} items.")
 
-def get_online_store_publication_id():
-    query = """
-    {
-      publications(first: 10) {
-        edges {
-          node {
-            id
-            name
-          }
-        }
-      }
-    }
-    """
-
-    r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL, json={"query": query})
-    r.raise_for_status()
-    data = r.json()
-
-    for edge in data["data"]["publications"]["edges"]:
-        if "Online Store" in edge["node"]["name"]:
-            return edge["node"]["id"]
-
-    raise Exception("Online Store publication not found")
-
-UNPUBLISH_MUTATION = """
-mutation publishableUnpublish($id: ID!, $input: [PublicationInput!]!) {
-  publishableUnpublish(id: $id, input: $input) {
-    userErrors { field message }
-  }
-}
-"""
 
 
-def unpublish_products(items, publication_id):
-    seen = set()
-
-    for item in items:
-        pid = item["productId"]
-        if pid in seen:
-            continue
-        seen.add(pid)
-
-        variables = {
-            "id": pid,
-            "input": [{"publicationId": publication_id}]
-        }
-
-        r = requests.post(
-            API_GRAPHQL,
-            headers=HEADERS_GRAPHQL,
-            json={"query": UNPUBLISH_MUTATION, "variables": variables}
-        )
-        r.raise_for_status()
-        time.sleep(0.3)
-
-    print(f"Unpublished {len(seen)} products.")
 
 # === MAIN ===
 def main():
@@ -464,7 +454,6 @@ def main():
     print(f"Using file: {downloaded_file}")
 
     location_gid = get_location_id()
-    publication_id = get_online_store_publication_id()
 
     inventory_map = fetch_inventory_items()
     updates = read_csv(downloaded_file, inventory_map)
@@ -479,15 +468,14 @@ def main():
     else:
         print("No SKUs to update.")
 
-    # === NEW LOGIC ===
-    to_unpublish = find_skus_to_unpublish(inventory_map, updates, PRODUCER)
+    # === ARCHIVE LOGIC ===
+    to_archive = find_skus_to_archive(inventory_map, updates, PRODUCER)
 
-    # SAFE TEST MODE (no API calls)
-    print("TEST MODE: no publish changes applied")
+    print(f"TEST MODE: would archive {len({x['productId'] for x in to_archive})} products")
 
-    # === ENABLE BELOW AFTER VERIFYING COUNTS ===
-    # if to_unpublish:
-    #     unpublish_products(to_unpublish, publication_id)
+    # ENABLE AFTER TESTING:
+    # if to_archive:
+    #     archive_products(to_archive)
 
 
 if __name__ == "__main__":
