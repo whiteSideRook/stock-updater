@@ -254,7 +254,6 @@ def fetch_inventory_items():
                 id
                 title
                 vendor
-                publishedOnCurrentPublication
                 variants(first:100) {
                   edges {
                     node { sku inventoryItem { id } }
@@ -285,8 +284,7 @@ def fetch_inventory_items():
                         "inventoryItemId": inv_id,
                         "productId": edge["node"]["id"],
                         "title": edge["node"]["title"],
-                        "vendor": edge["node"]["vendor"],
-                        "published": edge["node"]["publishedOnCurrentPublication"]
+                        "vendor": edge["node"]["vendor"]
                     }
 
         page = data["data"]["products"]["pageInfo"]
