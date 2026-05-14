@@ -14,8 +14,12 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
-# === PRODUCER CONFIG ===
-PRODUCER = "Ekkia"
+
+# =========================
+# CONFIG
+# =========================
+
+DRY_RUN = True
 
 BRAND_TO_PRODUCER = {
     "ABSORBINE": "Ekkia",
@@ -43,13 +47,6 @@ BRAND_TO_PRODUCER = {
 }
 
 
-def get_brands_for_producer(producer_name):
-    return {
-        brand.upper()
-        for brand, producer in BRAND_TO_PRODUCER.items()
-        if producer == producer_name
-    }
-
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -58,7 +55,6 @@ def require_env(name: str) -> str:
     return value
 
 
-# === ENV ===
 APP_URL = require_env("APP_URL")
 APP_PASSWORD = require_env("APP_PASSWORD")
 SHOPIFY_STORE = require_env("SHOPIFY_STORE")
@@ -67,8 +63,6 @@ ACCESS_TOKEN = require_env("ACCESS_TOKEN")
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-
-# === SHOPIFY ===
 API_GRAPHQL = f"https://{SHOPIFY_STORE}/admin/api/2025-07/graphql.json"
 HEADERS_GRAPHQL = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
@@ -76,7 +70,10 @@ HEADERS_GRAPHQL = {
 }
 
 
-# === SELENIUM SETUP ===
+# =========================
+# SELENIUM
+# =========================
+
 def setup_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -98,77 +95,23 @@ def setup_driver():
     )
 
 
-# === DOWNLOAD ===
 def download_latest_file():
-    from selenium.common.exceptions import StaleElementReferenceException
-
     driver = setup_driver()
 
     try:
         driver.get(APP_URL)
+        wait = WebDriverWait(driver, 20)
 
-        wait = WebDriverWait(
-            driver,
-            20,
-            ignored_exceptions=(StaleElementReferenceException,)
-        )
-
-        # --- LOGIN ---
         password_input = wait.until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
         )
         password_input.send_keys(APP_PASSWORD)
 
-        submit_btn = driver.find_element(By.CSS_SELECTOR, "button, input[type='submit']")
-        submit_btn.click()
+        driver.find_element(By.CSS_SELECTOR, "button, input[type='submit']").click()
 
-        # --- WAIT FOR TABLE ---
         wait.until(EC.presence_of_element_located((By.ID, "files-datatable_data")))
+        wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui")))
 
-        # wait for ajax overlay to disappear
-        wait.until(
-            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ajax-status-block-ui"))
-        )
-
-        # --- SORT BUTTON ---
-        mod_header = wait.until(
-            EC.element_to_be_clickable((By.ID, "files-datatable:j_idt156"))
-        )
-
-        # --- FIRST SORT CLICK ---
-        first_name_before = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "#files-datatable_data tr .filename-column a")
-            )
-        ).text
-
-        driver.execute_script("arguments[0].click();", mod_header)
-
-        wait.until(lambda d: (
-            d.find_element(
-                By.CSS_SELECTOR,
-                "#files-datatable_data tr .filename-column a"
-            ).text != first_name_before
-        ))
-
-        # --- SECOND SORT CLICK ---
-        first_name_before = driver.find_element(
-            By.CSS_SELECTOR,
-            "#files-datatable_data tr .filename-column a"
-        ).text
-
-        driver.execute_script("arguments[0].click();", mod_header)
-
-        wait.until(lambda d: (
-            d.find_element(
-                By.CSS_SELECTOR,
-                "#files-datatable_data tr .filename-column a"
-            ).text != first_name_before
-        ))
-
-        # ------------------------------------------------------------
-        # FIXED PART: scan top 10 rows instead of trusting row 1
-        # ------------------------------------------------------------
         rows = driver.find_elements(By.CSS_SELECTOR, "#files-datatable_data tr")
 
         filename = None
@@ -177,36 +120,22 @@ def download_latest_file():
         for row in rows[:10]:
             try:
                 link = row.find_element(By.CSS_SELECTOR, ".filename-column a")
-
-                name = (
-                    link.get_attribute("aria-label")
-                    or link.get_attribute("title")
-                    or link.text
-                    or ""
-                ).strip()
+                name = (link.text or "").strip()
 
                 if name.startswith("PDT_DISPO_"):
                     filename = name
                     target_row = row
                     break
-
-            except Exception:
+            except:
                 continue
 
-        if not filename or not target_row:
-            raise Exception("No PDT_DISPO file found in top 10 rows")
+        if not filename:
+            raise Exception("No PDT_DISPO file found")
 
         print(f"Selected file: {filename}")
 
-        # --- DOWNLOAD ---
-        download_button = target_row.find_element(
-            By.CSS_SELECTOR,
-            "button[title*='Télé']"
-        )
-
+        download_button = target_row.find_element(By.CSS_SELECTOR, "button[title*='Télé']")
         driver.execute_script("arguments[0].click();", download_button)
-
-        print(f"Downloading: {filename}")
 
         target_path = os.path.join(DOWNLOAD_DIR, filename)
 
@@ -220,28 +149,21 @@ def download_latest_file():
     finally:
         driver.quit()
 
-# === SHOPIFY HELPERS ===
+
+# =========================
+# SHOPIFY
+# =========================
+
 def get_location_id():
-    query = "{ locations(first:1) { edges { node { id name } } } }"
+    query = "{ locations(first:1) { edges { node { id } } } }"
     r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL, json={"query": query})
-
     r.raise_for_status()
-    resp_json = r.json()
-
-    if "data" not in resp_json:
-        print("Shopify response missing 'data':", resp_json)
-        raise Exception("Failed to fetch Shopify locations. Check token and query.")
-
-    edges = resp_json["data"]["locations"]["edges"]
-    if not edges:
-        raise Exception("No Shopify locations found")
-
-    return edges[0]["node"]["id"]
-
+    return r.json()["data"]["locations"]["edges"][0]["node"]["id"]
 
 
 def fetch_inventory_items():
     inventory_map = {}
+    product_sku_map = {}
     cursor = None
 
     while True:
@@ -254,9 +176,13 @@ def fetch_inventory_items():
                 id
                 title
                 vendor
+                status
                 variants(first:100) {
                   edges {
-                    node { sku inventoryItem { id } }
+                    node {
+                      sku
+                      inventoryItem { id }
+                    }
                   }
                 }
               }
@@ -270,22 +196,29 @@ def fetch_inventory_items():
         r.raise_for_status()
         data = r.json()
 
-        if not data.get("data"):
-            print("GRAPHQL FAILED RESPONSE:")
-            print(data)
-            raise Exception("Shopify returned null data (auth/scope issue)")
-
         for edge in data["data"]["products"]["edges"]:
-            for v in edge["node"]["variants"]["edges"]:
+            p = edge["node"]
+
+            if p.get("status") == "ARCHIVED":
+                continue
+
+            vendor = (p.get("vendor") or "").upper().strip()
+
+            for v in p["variants"]["edges"]:
                 sku = v["node"]["sku"]
-                inv_id = v["node"]["inventoryItem"]["id"]
-                if sku:
-                    inventory_map[sku.strip()] = {
-                        "inventoryItemId": inv_id,
-                        "productId": edge["node"]["id"],
-                        "title": edge["node"]["title"],
-                        "vendor": edge["node"]["vendor"]
-                    }
+                if not sku:
+                    continue
+
+                sku = sku.strip()
+
+                inventory_map[sku] = {
+                    "inventoryItemId": v["node"]["inventoryItem"]["id"],
+                    "productId": p["id"],
+                    "vendor": vendor,
+                    "title": p["title"]
+                }
+
+                product_sku_map.setdefault(p["id"], set()).add(sku)
 
         page = data["data"]["products"]["pageInfo"]
         if page["hasNextPage"]:
@@ -293,131 +226,119 @@ def fetch_inventory_items():
         else:
             break
 
-        time.sleep(0.4)
+        time.sleep(0.3)
 
-    print(f"Fetched {len(inventory_map)} SKUs from Shopify.")
-    return inventory_map
+    return inventory_map, product_sku_map
 
 
-# === CSV ===
+# =========================
+# CSV
+# =========================
+
 def read_csv(input_file, valid_skus):
     updates = []
-    skipped = 0
+    csv_skus = set()
 
     with open(input_file, "rb") as f:
         raw = f.read()
 
     encoding = chardet.detect(raw)["encoding"] or "utf-8"
-    sample = raw[:2048].decode(encoding, errors="replace")
+    text = raw.decode(encoding, errors="replace")
 
-    if sample.count(";") > sample.count(","):
-        sep = ";"
-    elif sample.count("\t") > sample.count(","):
-        sep = "\t"
-    else:
-        sep = ","
+    sep = ";" if text.count(";") > text.count(",") else ","
 
-    df = pd.read_csv(StringIO(raw.decode(encoding, errors="replace")),
-                     sep=sep, header=None)
+    df = pd.read_csv(StringIO(text), sep=sep, header=None)
 
     for _, row in df.iterrows():
         sku = str(row[0]).strip()
+        csv_skus.add(sku)
 
         try:
             qty = int(row[1])
-        except Exception:
-            qty = None
+        except:
+            continue
 
-        if sku in valid_skus and qty is not None:
+        if sku in valid_skus:
             updates.append({
                 "sku": sku,
                 "quantity": qty,
                 "inventoryItemId": valid_skus[sku]["inventoryItemId"]
             })
-        else:
-            skipped += 1
 
-    print(f"Prepared {len(updates)} updates, skipped {skipped}.")
-    return updates
-
-# === UPDATE ===
-MUTATION = """
-mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-  inventorySetQuantities(input: $input) {
-    userErrors { field message }
-  }
-}
-"""
-
-ARCHIVE_MUTATION = """
-mutation productArchive($input: ProductInput!) {
-  productUpdate(input: $input) {
-    product {
-      id
-      status
-    }
-    userErrors {
-      field
-      message
-    }
-  }
-}
-"""
-
-def archive_products(items):
-    seen = set()
-
-    for item in items:
-        pid = item["productId"]
-
-        if pid in seen:
-            continue
-        seen.add(pid)
-
-        variables = {
-            "input": {
-                "id": pid,
-                "status": "ARCHIVED"
-            }
-        }
-
-        r = requests.post(
-            API_GRAPHQL,
-            headers=HEADERS_GRAPHQL,
-            json={"query": ARCHIVE_MUTATION, "variables": variables}
-        )
-
-        r.raise_for_status()
-        time.sleep(0.3)
-
-    print(f"Archived {len(seen)} products.")
+    return updates, csv_skus
 
 
-def find_skus_to_archive(inventory_map, updates, producer_name):
-    supplier_skus = {u["sku"] for u in updates}
-    producer_brands = get_brands_for_producer(producer_name)
+# =========================
+# LOGIC
+# =========================
 
-    to_archive = []
+def compute_missing_and_archives(inventory_map, product_sku_map, csv_skus):
+    missing_updates = []
+    product_missing = {}
 
     for sku, data in inventory_map.items():
-        vendor = (data.get("vendor") or "").upper()
-
-        if vendor not in producer_brands:
+        if data["vendor"] not in BRAND_TO_PRODUCER:
             continue
 
-        if sku not in supplier_skus:
-            to_archive.append({
+        if sku not in csv_skus:
+            missing_updates.append({
                 "sku": sku,
+                "quantity": 0,
+                "inventoryItemId": data["inventoryItemId"],
                 "productId": data["productId"]
             })
 
-    print(f"Products to archive: {len({x['productId'] for x in to_archive})}")
-    return to_archive
+            product_missing.setdefault(data["productId"], set()).add(sku)
+
+    archive_products = []
+
+    for product_id, skus in product_sku_map.items():
+
+        ekkia_skus = {
+            s for s in skus
+            if s in inventory_map
+        }
+
+        missing = product_missing.get(product_id, set())
+
+        if ekkia_skus and ekkia_skus.issubset(missing):
+            archive_products.append(product_id)
+
+    return missing_updates, archive_products
 
 
-def update_inventory(updates, location_gid, batch_size=250):
-    for i in range(0, len(updates), batch_size):
-        batch = updates[i:i + batch_size]
+# =========================
+# SHOPIFY ACTIONS
+# =========================
+
+def archive_products(product_ids):
+    mutation = """
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product { id status }
+      }
+    }
+    """
+
+    for pid in product_ids:
+        requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL, json={
+            "query": mutation,
+            "variables": {"input": {"id": pid, "status": "ARCHIVED"}}
+        })
+        time.sleep(0.3)
+
+
+def update_inventory(updates, location_gid):
+    mutation = """
+    mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+      inventorySetQuantities(input: $input) {
+        userErrors { field message }
+      }
+    }
+    """
+
+    for i in range(0, len(updates), 250):
+        batch = updates[i:i+250]
 
         variables = {
             "input": {
@@ -426,54 +347,51 @@ def update_inventory(updates, location_gid, batch_size=250):
                 "ignoreCompareQuantity": True,
                 "quantities": [
                     {
-                        "inventoryItemId": item["inventoryItemId"],
+                        "inventoryItemId": u["inventoryItemId"],
                         "locationId": location_gid,
-                        "quantity": item["quantity"]
+                        "quantity": u["quantity"]
                     }
-                    for item in batch
+                    for u in batch
                 ]
             }
         }
 
-        r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL,
-                          json={"query": MUTATION, "variables": variables})
-        r.raise_for_status()
+        requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL,
+                      json={"query": mutation, "variables": variables})
 
-        time.sleep(0.5)
-
-    print(f"Inventory update complete for {len(updates)} items.")
+        time.sleep(0.4)
 
 
+# =========================
+# MAIN
+# =========================
 
-
-# === MAIN ===
 def main():
-    downloaded_file = download_latest_file()
-    print(f"Using file: {downloaded_file}")
+    file = download_latest_file()
+    print("File:", file)
 
     location_gid = get_location_id()
 
-    inventory_map = fetch_inventory_items()
-    updates = read_csv(downloaded_file, inventory_map)
+    inventory_map, product_sku_map = fetch_inventory_items()
+    updates, csv_skus = read_csv(file, inventory_map)
 
-    # 🚨 SAFETY CHECK
-    if len(updates) < 2000:
-        print("ABORT: too few updates, possible supplier error")
+    missing, to_archive = compute_missing_and_archives(
+        inventory_map,
+        product_sku_map,
+        csv_skus
+    )
+
+    if DRY_RUN:
+        print("\n=== DRY RUN ===")
+        print("CSV updates:", len(updates))
+        print("Missing SKUs (set to 0):", len(missing))
+        print("Products to archive:", len(to_archive))
         return
 
-    if updates:
-        update_inventory(updates, location_gid)
-    else:
-        print("No SKUs to update.")
+    update_inventory(updates + missing, location_gid)
 
-    # === ARCHIVE LOGIC ===
-    to_archive = find_skus_to_archive(inventory_map, updates, PRODUCER)
-
-    print(f"TEST MODE: would archive {len({x['productId'] for x in to_archive})} products")
-
-    # ENABLE AFTER TESTING:
-    # if to_archive:
-    #     archive_products(to_archive)
+    if to_archive:
+        archive_products(to_archive)
 
 
 if __name__ == "__main__":
