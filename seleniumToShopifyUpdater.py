@@ -608,7 +608,11 @@ def main():
     # SKU-LEVEL CLEANUP (EKKIA)
     # -----------------------------
     ekkia_missing_skus = [
-        sku for sku, data in inventory_map.items()
+        {
+            "sku": sku,
+            "inventoryItemId": data["inventoryItemId"]
+        }
+        for sku, data in inventory_map.items()
         if is_ekkia_product(data.get("vendor", ""))
         and sku not in csv_skus
     ]
