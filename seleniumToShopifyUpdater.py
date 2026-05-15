@@ -617,6 +617,8 @@ def main():
     print(f"Ekkia SKUs to be set to 0: {len(ekkia_missing_skus)}")
     print("====================================\n")
 
+    remove_missing_skus(ekkia_missing_skus, location_gid)
+    
     # -----------------------------
     # PRODUCT GROUPING
     # -----------------------------
