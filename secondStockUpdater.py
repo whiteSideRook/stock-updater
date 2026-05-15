@@ -331,10 +331,6 @@ def evaluate_products(products, csv_skus, min_variants_threshold=5):
     return to_archive
 
 def remove_missing_skus(missing_skus, location_gid):
-    if len(missing_skus) > 10000:
-        print("Safety stop triggered")
-        return
-
     updates = [
         {
             "sku": item["sku"],
@@ -416,7 +412,7 @@ def main():
     print(f"Eldorado SKUs to be set to 0: {total_missing_skus}")
     print("======================================\n")
 
-    RUN_ZERO_STOCK = False
+    RUN_ZERO_STOCK = True
 
     if RUN_ZERO_STOCK:
         remove_missing_skus(missing_skus, location_gid)
@@ -439,7 +435,7 @@ def main():
     print(f"Single variant remaining: {single_left}")
     print("==========================================\n")
 
-    RUN_ARCHIVE = False
+    RUN_ARCHIVE = True
 
     if RUN_ARCHIVE:
         archive_products(to_archive)
