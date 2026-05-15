@@ -661,7 +661,7 @@ def main():
     # -----------------------------
     # OPTIONAL EXECUTION SWITCH
     # -----------------------------
-    RUN_ARCHIVE = False  # change to True when ready
+    RUN_ARCHIVE = True  # change to True when ready
 
     archive_products(to_archive, dry_run=not RUN_ARCHIVE)
 
