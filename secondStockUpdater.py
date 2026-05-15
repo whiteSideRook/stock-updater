@@ -7,6 +7,19 @@ from ftplib import FTP
 import os
 import sys
 
+BRAND_TO_PRODUCER = {
+    "CATAGO": "Eldorado",
+    "ELDORADO": "Eldorado",
+    "EQUIPAGE": "Eldorado",
+    "HORSEGUARD": "Eldorado"
+}
+
+
+def is_eldorado_product(vendor: str) -> bool:
+    if not vendor:
+        return False
+    return vendor.strip().upper() in BRAND_TO_PRODUCER
+
 
 def require_env(name: str) -> str:
     value = os.getenv(name)
@@ -64,6 +77,7 @@ def get_location_id():
 def fetch_inventory_items():
     inventory_map = {}
     cursor = None
+
     while True:
         query = """
         query($cursor: String) {
@@ -71,10 +85,16 @@ def fetch_inventory_items():
             pageInfo { hasNextPage endCursor }
             edges {
               node {
+                id
                 title
+                vendor
+                status
                 variants(first:100) {
                   edges {
-                    node { sku inventoryItem { id } }
+                    node {
+                      sku
+                      inventoryItem { id }
+                    }
                   }
                 }
               }
@@ -82,28 +102,40 @@ def fetch_inventory_items():
           }
         }
         """
-        variables = {"cursor": cursor}
-        r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL, json={"query": query, "variables": variables})
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": query, "variables": {"cursor": cursor}}
+        )
+
         r.raise_for_status()
         data = r.json()
 
-        if "errors" in data:
-            print("GraphQL error occurred while fetching products.")
-            break
+        for edge in data["data"]["products"]["edges"]:
+            product = edge["node"]
+            title = product["title"]
+            vendor = product.get("vendor", "")
+            status = product.get("status", "")
+            product_id = product.get("id")
 
-        edges = data.get("data", {}).get("products", {}).get("edges", [])
-        for edge in edges:
-            title = edge["node"]["title"]
-            for variant_edge in edge["node"]["variants"]["edges"]:
-                node = variant_edge["node"]
+            for v in product["variants"]["edges"]:
+                node = v["node"]
                 sku = node["sku"]
                 inv_id = node["inventoryItem"]["id"]
-                if sku:
-                    inventory_map[sku.strip()] = {"inventoryItemId": inv_id, "title": title}
 
-        page_info = data.get("data", {}).get("products", {}).get("pageInfo", {})
-        if page_info.get("hasNextPage"):
-            cursor = page_info.get("endCursor")
+                if sku:
+                    inventory_map[sku.strip().upper()] = {
+                        "inventoryItemId": inv_id,
+                        "title": title,
+                        "vendor": vendor,
+                        "product_id": product_id,
+                        "status": status
+                    }
+
+        page = data["data"]["products"]["pageInfo"]
+        if page["hasNextPage"]:
+            cursor = page["endCursor"]
         else:
             break
 
@@ -224,12 +256,142 @@ def update_inventory(updates, location_gid, batch_size=250):
 
     print(f"\nInventory update complete. {total_updated} updated, {total_errors} errors.")
 
+def find_missing_eldorado_skus(inventory_map, csv_skus):
+    missing = []
+
+    for sku, data in inventory_map.items():
+        if not is_eldorado_product(data.get("vendor", "")):
+            continue
+
+        if sku not in csv_skus:
+            missing.append({
+                "sku": sku,
+                "inventoryItemId": data["inventoryItemId"],
+                "title": data["title"],
+                "vendor": data["vendor"]
+            })
+
+    print(f"Eldorado missing SKUs: {len(missing)}")
+    return missing
+
+def build_product_groups(inventory_map):
+    products = {}
+
+    for sku, data in inventory_map.items():
+        if not is_eldorado_product(data.get("vendor", "")):
+            continue
+
+        product_id = data.get("product_id")
+        if not product_id:
+            continue
+
+        if data.get("status", "").upper() == "ARCHIVED":
+            continue
+
+        if product_id not in products:
+            products[product_id] = {
+                "title": data["title"],
+                "skus": []
+            }
+
+        products[product_id]["skus"].append(sku)
+
+    return products
+
+def evaluate_products(products, csv_skus, min_variants_threshold=5):
+    to_archive = []
+
+    for product_id, data in products.items():
+        skus = data["skus"]
+
+        total_variants = len(skus)
+        active_variants = sum(1 for s in skus if s in csv_skus)
+
+        # CASE 1: all missing
+        if active_variants == 0:
+            to_archive.append({
+                "product_id": product_id,
+                "title": data["title"],
+                "reason": "all_missing",
+                "total": total_variants,
+                "active": active_variants
+            })
+            continue
+
+        # CASE 2: large product, only 1 variant left
+        if total_variants >= min_variants_threshold and active_variants == 1:
+            to_archive.append({
+                "product_id": product_id,
+                "title": data["title"],
+                "reason": "single_variant_left",
+                "total": total_variants,
+                "active": active_variants
+            })
+
+    return to_archive
+
+def remove_missing_skus(missing_skus, location_gid):
+    if len(missing_skus) > 10000:
+        print("Safety stop triggered")
+        return
+
+    updates = [
+        {
+            "sku": item["sku"],
+            "quantity": 0,
+            "inventoryItemId": item["inventoryItemId"]
+        }
+        for item in missing_skus
+    ]
+
+    update_inventory(updates, location_gid)
+
+
+def archive_products(to_archive):
+    MUTATION = """
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product { id status }
+        userErrors { field message }
+      }
+    }
+    """
+
+    archived = 0
+
+    for p in to_archive:
+        variables = {
+            "input": {
+                "id": p["product_id"],
+                "status": "ARCHIVED"
+            }
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": MUTATION, "variables": variables}
+        )
+
+        r.raise_for_status()
+        archived += 1
+        time.sleep(0.3)
+
+    print(f"Archived products: {archived}")
+
+
+
 
 # --- Main ---
 def main():
     input_file = fetch_csv_from_ftp()
     location_gid = get_location_id()
+
     inventory_map = fetch_inventory_items()
+
+    # -------------------------
+    # CSV updates (UNCHANGED)
+    # -------------------------
     updates = read_csv(input_file, inventory_map)
 
     if updates:
@@ -237,6 +399,50 @@ def main():
     else:
         print("No valid SKUs to update.")
 
+    # -------------------------
+    # CSV SKUs
+    # -------------------------
+    df = pd.read_csv(input_file, header=None)
+    csv_skus = set(df[0].astype(str).str.strip().str.upper())
+
+    # =========================================================
+    # SKU CLEANUP DRY RUN (ELDORADO)
+    # =========================================================
+    missing_skus = find_missing_eldorado_skus(inventory_map, csv_skus)
+
+    total_missing_skus = len(missing_skus)
+
+    print("\n=== SKU CLEANUP DRY RUN (ELDORADO) ===")
+    print(f"Eldorado SKUs to be set to 0: {total_missing_skus}")
+    print("======================================\n")
+
+    RUN_ZERO_STOCK = False
+
+    if RUN_ZERO_STOCK:
+        remove_missing_skus(missing_skus, location_gid)
+
+    # =========================================================
+    # PRODUCT GROUPING + ARCHIVE DRY RUN
+    # =========================================================
+    products = build_product_groups(inventory_map)
+
+    to_archive = evaluate_products(products, csv_skus)
+
+    total_products = len(to_archive)
+
+    all_missing = sum(1 for p in to_archive if p["reason"] == "all_missing")
+    single_left = sum(1 for p in to_archive if p["reason"] == "single_variant_left")
+
+    print("\n=== PRODUCT ARCHIVE DRY RUN (ELDORADO) ===")
+    print(f"Products flagged for archive: {total_products}")
+    print(f"All variants missing: {all_missing}")
+    print(f"Single variant remaining: {single_left}")
+    print("==========================================\n")
+
+    RUN_ARCHIVE = False
+
+    if RUN_ARCHIVE:
+        archive_products(to_archive)
 
 if __name__ == "__main__":
     main()
