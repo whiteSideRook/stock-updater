@@ -242,8 +242,10 @@ def fetch_inventory_items():
             pageInfo { hasNextPage endCursor }
             edges {
               node {
+                id
                 title
                 vendor
+                status
                 variants(first:100) {
                   edges {
                     node { sku inventoryItem { id } }
@@ -255,20 +257,28 @@ def fetch_inventory_items():
         }
         """
 
-        r = requests.post(API_GRAPHQL, headers=HEADERS_GRAPHQL,
-                          json={"query": query, "variables": {"cursor": cursor}})
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": query, "variables": {"cursor": cursor}}
+        )
         r.raise_for_status()
         data = r.json()
 
         for edge in data["data"]["products"]["edges"]:
-            for v in edge["node"]["variants"]["edges"]:
+            product = edge["node"]
+
+            for v in product["variants"]["edges"]:
                 sku = v["node"]["sku"]
                 inv_id = v["node"]["inventoryItem"]["id"]
+
                 if sku:
-                    inventory_map[sku.strip()] = {
+                    inventory_map[sku.strip().upper()] = {
                         "inventoryItemId": inv_id,
-                        "title": edge["node"]["title"],
-                        "vendor": edge["node"]["vendor"]
+                        "title": product["title"],
+                        "vendor": product["vendor"],
+                        "product_id": product["id"],
+                        "status": product["status"]
                     }
 
         page = data["data"]["products"]["pageInfo"]
@@ -447,6 +457,74 @@ def remove_missing_skus(missing_skus, location_gid):
 
     update_inventory(removal_updates, location_gid)
 
+from collections import defaultdict
+
+def build_product_groups(inventory_map):
+    products = {}
+
+    for sku, data in inventory_map.items():
+        vendor = data.get("vendor", "")
+        product_id = data.get("product_id")
+
+        if not is_ekkia_product(vendor):
+            continue
+
+        if not product_id:
+            continue
+
+        # skip archived products (Shopify truth)
+        if data.get("status") == "ARCHIVED":
+            continue
+
+        if product_id not in products:
+            products[product_id] = {
+                "title": data["title"],
+                "vendor": vendor,
+                "skus": []
+            }
+
+        products[product_id]["skus"].append(sku)
+
+    return products
+
+def evaluate_products(products, csv_skus, min_variants_threshold=5):
+    to_archive = []
+
+    for product_id, data in products.items():
+        skus = data["skus"]
+
+        total_variants = len(skus)
+        active_variants = sum(1 for s in skus if s in csv_skus)
+
+        # RULE A: all variants missing
+        if active_variants == 0:
+            to_archive.append({
+                "product_id": product_id,
+                "product": data["title"],
+                "reason": "all_variants_missing",
+                "total": total_variants,
+                "active": active_variants
+            })
+            continue
+
+        # RULE B: only 1 variant left but product is large enough
+        if (
+            active_variants == 1
+            and total_variants >= min_variants_threshold
+        ):
+            to_archive.append({
+                "product_id": product_id,
+                "product": data["title"],
+                "reason": "single_variant_remaining",
+                "total": total_variants,
+                "active": active_variants
+            })
+
+    return to_archive
+
+
+
+
 # === MAIN ===
 def main():
     downloaded_file = download_latest_file()
@@ -455,7 +533,7 @@ def main():
     location_gid = get_location_id()
     inventory_map = fetch_inventory_items()
 
-    # Existing update flow
+    # === SKU UPDATE FLOW (UNCHANGED) ===
     updates = read_csv(downloaded_file, inventory_map)
 
     if updates:
@@ -463,17 +541,44 @@ def main():
     else:
         print("No SKUs to update.")
 
-    # --- NEW LOGIC ---
+    # === NEW LOGIC: PRODUCT ARCHIVING ===
+
     csv_skus = extract_csv_skus(downloaded_file)
-    missing_skus = find_missing_ekkia_skus(inventory_map, csv_skus)
 
-    # Dry run first
-    count = dry_run_removals(missing_skus)
-    print(f"\n=== DRY RUN SUMMARY ===")
-    print(f"Total SKUs that would be removed: {count}\n")
+    products = build_product_groups(inventory_map)
 
-    # Uncomment when ready for production
-    # remove_missing_skus(missing_skus, location_gid)
+    to_archive = evaluate_products(
+        products,
+        csv_skus,
+        min_variants_threshold=5
+    )
+
+    print("\n=== PRODUCT ARCHIVE DRY RUN ===")
+
+    total_products = len(to_archive)
+
+    # total missing SKUs implied by archive candidates
+    total_missing_variants = sum(
+        p["total"] - p["active"] for p in to_archive
+    )
+
+    all_missing_products = sum(
+        1 for p in to_archive if p["reason"] == "all_variants_missing"
+    )
+
+    single_variant_products = sum(
+        1 for p in to_archive if p["reason"] == "single_variant_remaining"
+    )
+
+    print(f"Products flagged for archive: {total_products}")
+    print(f"Products with ALL variants missing: {all_missing_products}")
+    print(f"Products with SINGLE variant remaining: {single_variant_products}")
+    print(f"Total missing variants (across flagged products): {total_missing_variants}")
+
+    print("================================\n")
+
+    # NOTE: actual archive execution intentionally not enabled yet
+    # archive_products(to_archive, location_gid)
 
 
 if __name__ == "__main__":
