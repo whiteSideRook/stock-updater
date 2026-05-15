@@ -22,6 +22,31 @@ def require_env(name: str) -> str:
         sys.exit(1)
     return value
 
+BRAND_TO_PRODUCER = {
+    "ABSORBINE": "Ekkia",
+    "BORSTIQ": "Ekkia",
+    "CARR & DAY MARTIN": "Ekkia",
+    "CHOPLIN": "Ekkia",
+    "EDEN BY PENELOPE": "Ekkia",
+    "EFFAX": "Ekkia",
+    "EQUI-KIDS": "Ekkia",
+    "EQUITHEME": "Ekkia",
+    "ERIC THOMAS": "Ekkia",
+    "FEELING": "Ekkia",
+    "HEINIGER": "Ekkia",
+    "LEOVET": "Ekkia",
+    "NACA": "Ekkia",
+    "NAF": "Ekkia",
+    "NORTON": "Ekkia",
+    "PADDOCK": "Ekkia",
+    "PENELOPE": "Ekkia",
+    "PENELOPE COLLECTIONS": "Ekkia",
+    "RIDING WORLD": "Ekkia",
+    "FLECK": "Ekkia",
+    "LISTER": "Ekkia",
+    "PADDOCK SPORTS": "Ekkia"
+}
+
 
 # === ENV ===
 APP_URL = require_env("APP_URL")
@@ -218,6 +243,7 @@ def fetch_inventory_items():
             edges {
               node {
                 title
+                vendor
                 variants(first:100) {
                   edges {
                     node { sku inventoryItem { id } }
@@ -241,7 +267,8 @@ def fetch_inventory_items():
                 if sku:
                     inventory_map[sku.strip()] = {
                         "inventoryItemId": inv_id,
-                        "title": edge["node"]["title"]
+                        "title": edge["node"]["title"],
+                        "vendor": edge["node"]["vendor"]
                     }
 
         page = data["data"]["products"]["pageInfo"]
@@ -337,6 +364,89 @@ def update_inventory(updates, location_gid, batch_size=250):
     print(f"Inventory update complete for {len(updates)} items.")
 
 
+def is_ekkia_product(vendor: str) -> bool:
+    if not vendor:
+        return False
+    return vendor.strip().upper() in BRAND_TO_PRODUCER
+
+def find_missing_ekkia_skus(inventory_map, csv_skus):
+    missing = []
+
+    for sku, data in inventory_map.items():
+        vendor = data.get("vendor", "")
+
+        # Only consider Ekkia brands
+        if not is_ekkia_product(vendor):
+            continue
+
+        if sku not in csv_skus:
+            missing.append({
+                "sku": sku,
+                "inventoryItemId": data["inventoryItemId"],
+                "title": data["title"],
+                "vendor": vendor
+            })
+
+    print(f"Identified {len(missing)} missing Ekkia SKUs.")
+    return missing
+
+def extract_csv_skus(input_file):
+    skus = set()
+
+    with open(input_file, "rb") as f:
+        raw = f.read()
+
+    encoding = chardet.detect(raw)["encoding"] or "utf-8"
+    sample = raw[:2048].decode(encoding, errors="replace")
+
+    if sample.count(";") > sample.count(","):
+        sep = ";"
+    elif sample.count("\t") > sample.count(","):
+        sep = "\t"
+    else:
+        sep = ","
+
+    df = pd.read_csv(StringIO(raw.decode(encoding, errors="replace")),
+                     sep=sep, header=None)
+
+    for _, row in df.iterrows():
+        sku = str(row[0]).strip()
+        if sku:
+            skus.add(sku)
+
+    print(f"Extracted {len(skus)} SKUs from CSV.")
+    return skus
+
+
+
+def dry_run_removals(missing_skus):
+    count = len(missing_skus)
+    print(f"[DRY RUN] {count} SKUs would be removed.")
+
+    for item in missing_skus[:15]:
+        print(f" - {item['sku']} | {item['vendor']} | {item['title']}")
+
+    return count
+
+
+def remove_missing_skus(missing_skus, location_gid):
+    if len(missing_skus) > 300:
+        print(f"ABORTED: {len(missing_skus)} SKUs exceed safety limit (300).")
+        return
+
+    print(f"Removing {len(missing_skus)} SKUs (setting inventory to 0)...")
+
+    removal_updates = [
+        {
+            "sku": item["sku"],
+            "quantity": 0,
+            "inventoryItemId": item["inventoryItemId"]
+        }
+        for item in missing_skus
+    ]
+
+    update_inventory(removal_updates, location_gid)
+
 # === MAIN ===
 def main():
     downloaded_file = download_latest_file()
@@ -344,12 +454,26 @@ def main():
 
     location_gid = get_location_id()
     inventory_map = fetch_inventory_items()
+
+    # Existing update flow
     updates = read_csv(downloaded_file, inventory_map)
 
     if updates:
         update_inventory(updates, location_gid)
     else:
         print("No SKUs to update.")
+
+    # --- NEW LOGIC ---
+    csv_skus = extract_csv_skus(downloaded_file)
+    missing_skus = find_missing_ekkia_skus(inventory_map, csv_skus)
+
+    # Dry run first
+    count = dry_run_removals(missing_skus)
+    print(f"\n=== DRY RUN SUMMARY ===")
+    print(f"Total SKUs that would be removed: {count}\n")
+
+    # Uncomment when ready for production
+    # remove_missing_skus(missing_skus, location_gid)
 
 
 if __name__ == "__main__":
