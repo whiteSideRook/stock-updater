@@ -545,6 +545,16 @@ def main():
 
     csv_skus = extract_csv_skus(downloaded_file)
 
+    ekkia_missing_skus = [
+        sku for sku, data in inventory_map.items()
+        if is_ekkia_product(data.get("vendor", ""))
+        and sku not in csv_skus
+]
+
+    print("\n=== SKU INVENTORY CLEANUP (EKKIA) ===")
+    print(f"Ekkia SKUs to be set to 0: {len(ekkia_missing_skus)}")
+    print("====================================\n")
+
     products = build_product_groups(inventory_map)
 
     to_archive = evaluate_products(
