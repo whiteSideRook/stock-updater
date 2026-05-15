@@ -473,7 +473,7 @@ def build_product_groups(inventory_map):
             continue
 
         # skip archived products (Shopify truth)
-        if data.get("status") == "ARCHIVED":
+        if str(data.get("status", "")).upper() == "ARCHIVED":
             continue
 
         if product_id not in products:
@@ -522,7 +522,64 @@ def evaluate_products(products, csv_skus, min_variants_threshold=5):
 
     return to_archive
 
+def archive_products(to_archive, dry_run=True):
+    """
+    Archives Shopify products by setting status to ARCHIVED.
+    """
 
+    if not to_archive:
+        print("No products to archive.")
+        return
+
+    MUTATION = """
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+
+    archived_count = 0
+
+    for item in to_archive:
+        product_id = item["product_id"]
+
+        # Shopify expects gid format already (you already store full id ✔)
+        variables = {
+            "input": {
+                "id": product_id,
+                "status": "ARCHIVED"
+            }
+        }
+
+        if dry_run:
+            continue
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": MUTATION, "variables": variables}
+        )
+
+        r.raise_for_status()
+        resp = r.json()
+
+        errors = resp.get("data", {}).get("productUpdate", {}).get("userErrors", [])
+        if errors:
+            print(f"Failed to archive {product_id}: {errors}")
+            continue
+
+        archived_count += 1
+        time.sleep(0.3)
+
+    print(f"Archived {archived_count} products.")
 
 
 # === MAIN ===
@@ -541,20 +598,28 @@ def main():
     else:
         print("No SKUs to update.")
 
-    # === NEW LOGIC: PRODUCT ARCHIVING ===
+    # =========================================================
+    # === NEW LOGIC: SKU CLEANUP + PRODUCT ARCHIVING ==========
+    # =========================================================
 
     csv_skus = extract_csv_skus(downloaded_file)
 
+    # -----------------------------
+    # SKU-LEVEL CLEANUP (EKKIA)
+    # -----------------------------
     ekkia_missing_skus = [
         sku for sku, data in inventory_map.items()
         if is_ekkia_product(data.get("vendor", ""))
         and sku not in csv_skus
-]
+    ]
 
     print("\n=== SKU INVENTORY CLEANUP (EKKIA) ===")
     print(f"Ekkia SKUs to be set to 0: {len(ekkia_missing_skus)}")
     print("====================================\n")
 
+    # -----------------------------
+    # PRODUCT GROUPING
+    # -----------------------------
     products = build_product_groups(inventory_map)
 
     to_archive = evaluate_products(
@@ -563,11 +628,11 @@ def main():
         min_variants_threshold=5
     )
 
-    print("\n=== PRODUCT ARCHIVE DRY RUN ===")
-
+    # -----------------------------
+    # PRODUCT ARCHIVE DRY RUN
+    # -----------------------------
     total_products = len(to_archive)
 
-    # total missing SKUs implied by archive candidates
     total_missing_variants = sum(
         p["total"] - p["active"] for p in to_archive
     )
@@ -580,15 +645,19 @@ def main():
         1 for p in to_archive if p["reason"] == "single_variant_remaining"
     )
 
+    print("\n=== PRODUCT ARCHIVE DRY RUN ===")
     print(f"Products flagged for archive: {total_products}")
     print(f"Products with ALL variants missing: {all_missing_products}")
     print(f"Products with SINGLE variant remaining: {single_variant_products}")
     print(f"Total missing variants (across flagged products): {total_missing_variants}")
-
     print("================================\n")
 
-    # NOTE: actual archive execution intentionally not enabled yet
-    # archive_products(to_archive, location_gid)
+    # -----------------------------
+    # OPTIONAL EXECUTION SWITCH
+    # -----------------------------
+    RUN_ARCHIVE = False  # change to True when ready
+
+    archive_products(to_archive, dry_run=not RUN_ARCHIVE)
 
 
 if __name__ == "__main__":
