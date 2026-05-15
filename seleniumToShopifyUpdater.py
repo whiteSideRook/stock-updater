@@ -440,7 +440,7 @@ def dry_run_removals(missing_skus):
 
 
 def remove_missing_skus(missing_skus, location_gid):
-    if len(missing_skus) > 1300:
+    if len(missing_skus) > 3000:
         print(f"ABORTED: {len(missing_skus)} SKUs exceed safety limit (300).")
         return
 
