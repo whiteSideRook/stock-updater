@@ -657,9 +657,16 @@ def main():
     # -----------------------------
     # OPTIONAL EXECUTION SWITCH
     # -----------------------------
-    RUN_ARCHIVE = True  # change to True when ready
+    SAFETY_ARCHIVE_LIMIT = 500  # <-- set your limit here
 
-    archive_products(to_archive, dry_run=not RUN_ARCHIVE)
+    if total_products > SAFETY_ARCHIVE_LIMIT:
+        print("\n🚨 SAFETY CHECK FAILED — ARCHIVE SKIPPED")
+        print(f"Attempted to archive: {total_products} products")
+        print(f"Limit: {SAFETY_ARCHIVE_LIMIT}")
+        print("No products were archived.\n")
+    else:
+        RUN_ARCHIVE = True
+        archive_products(to_archive, dry_run=not RUN_ARCHIVE)
 
 
 if __name__ == "__main__":
