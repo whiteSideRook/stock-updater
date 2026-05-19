@@ -435,10 +435,19 @@ def main():
     print(f"Single variant remaining: {single_left}")
     print("==========================================\n")
 
+    SAFETY_ARCHIVE_LIMIT = 500  # <-- adjust this number
+    
     RUN_ARCHIVE = True
 
-    if RUN_ARCHIVE:
-        archive_products(to_archive)
+
+    if total_products > SAFETY_ARCHIVE_LIMIT:
+        print("\n🚨 SAFETY STOP — ARCHIVING SKIPPED")
+        print(f"Attempted to archive: {total_products} products")
+        print(f"Limit: {SAFETY_ARCHIVE_LIMIT}")
+        print("No products were archived.\n")
+    else:
+        if RUN_ARCHIVE:
+            archive_products(to_archive)
 
 if __name__ == "__main__":
     main()
