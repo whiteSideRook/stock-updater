@@ -727,7 +727,7 @@ def main():
         print(f"Limit: {SAFETY_ARCHIVE_LIMIT}")
         print("No products were archived.\n")
     else:
-        RUN_ARCHIVE = False
+        RUN_ARCHIVE = True
         archive_products(to_archive, dry_run=not RUN_ARCHIVE)
 
 
