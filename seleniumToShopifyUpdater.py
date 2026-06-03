@@ -25,7 +25,7 @@ def require_env(name: str) -> str:
 BRAND_TO_PRODUCER = {
     "ABSORBINE": "Ekkia",
     "BORSTIQ": "Ekkia",
-    "CARR & DAY MARTIN": "Ekkia",
+    "CARR & DAY & MARTIN": "Ekkia",
     "CHOPLIN": "Ekkia",
     "EDEN BY PENELOPE": "Ekkia",
     "EFFAX": "Ekkia",
@@ -305,9 +305,25 @@ def read_csv(input_file, valid_skus):
             3: {"quantity": 4, "archive": False},  # available
             2: {"quantity": 2, "archive": False},  # low stock
             1: {"quantity": 0, "archive": False},  # out of stock (DO NOT ARCHIVE)
-            0: {"quantity": 0, "archive": True},   # unavailable → archive signal
+            0: {"quantity": 0, "archive": True},   # unavailable → archive signal (conditional now)
         }
         return mapping.get(code, {"quantity": 0, "archive": False})
+
+    def has_valid_restock_date(value):
+        if value is None:
+            return False
+
+        value = str(value).strip()
+
+        if value == "" or value == "0000-00-01":
+            return False
+
+        # basic ISO date check (YYYY-MM-DD)
+        try:
+            time.strptime(value, "%Y-%m-%d")
+            return True
+        except Exception:
+            return False
 
     with open(input_file, "rb") as f:
         raw = f.read()
@@ -329,24 +345,22 @@ def read_csv(input_file, valid_skus):
         except Exception:
             code = None
 
+        restock_date = row[2] if len(row) > 2 else None
+
         if sku in valid_skus and code is not None:
             mapped = map_stock_code(code)
 
             product_id = valid_skus[sku]["product_id"]
 
-            # ------------------------------------
-            # STOCK UPDATE (ONLY RESPONSIBILITY)
-            # ------------------------------------
+            # STOCK UPDATE (unchanged)
             updates.append({
                 "sku": sku,
                 "quantity": mapped["quantity"],
                 "inventoryItemId": valid_skus[sku]["inventoryItemId"]
             })
 
-            # ------------------------------------
-            # ARCHIVE SIGNAL (ONLY CODE 0)
-            # ------------------------------------
-            if code == 0:
+            # ARCHIVE SIGNAL (UPDATED RULE)
+            if code == 0 and not has_valid_restock_date(restock_date):
                 archive_candidates.append({
                     "product_id": product_id,
                     "sku": sku
@@ -356,7 +370,7 @@ def read_csv(input_file, valid_skus):
             skipped += 1
 
     print(f"Prepared {len(updates)} updates, skipped {skipped}.")
-    print(f"Code 0 archive signals: {len(archive_candidates)}")
+    print(f"Code 0 archive signals (filtered by date): {len(archive_candidates)}")
 
     return updates, archive_candidates
 
@@ -368,6 +382,115 @@ mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
   }
 }
 """
+
+def evaluate_archived_products_for_reactivation(
+    products,
+    csv_skus,
+    code0_by_product,
+    min_large_product=5
+):
+    to_unarchive = []
+
+    for product_id, data in products.items():
+
+        skus = data["skus"]
+        total_variants = len(skus)
+
+        # archived check (NOW RELIABLE because we store status)
+        status = data.get("status", "").upper()
+        if status != "ARCHIVED":
+            continue
+
+        available_variants = 0
+
+        for sku in skus:
+            if sku in csv_skus and sku not in code0_by_product.get(product_id, set()):
+                available_variants += 1
+
+        # SMALL PRODUCT RULE (<5 variants)
+        if total_variants < min_large_product:
+            if available_variants >= 1:
+                to_unarchive.append({
+                    "product_id": product_id,
+                    "product": data["title"],
+                    "total": total_variants,
+                    "active": available_variants,
+                    "reason": "small_product_recovery"
+                })
+
+        # LARGE PRODUCT RULE (>=5 variants)
+        else:
+            if available_variants >= 2:
+                to_unarchive.append({
+                    "product_id": product_id,
+                    "product": data["title"],
+                    "total": total_variants,
+                    "active": available_variants,
+                    "reason": "large_product_recovery"
+                })
+
+    return to_unarchive
+
+
+def unarchive_products(to_unarchive, dry_run=True):
+    """
+    Reactivates Shopify archived products.
+    """
+
+    if not to_unarchive:
+        print("No products to unarchive.")
+        return
+
+    MUTATION = """
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+
+    restored = 0
+
+    for item in to_unarchive:
+        product_id = item["product_id"]
+
+        print(f"Restoring product: {item['product']} ({item['active']}/{item['total']} variants active)")
+
+        if dry_run:
+            continue
+
+        variables = {
+            "input": {
+                "id": product_id,
+                "status": "ACTIVE"
+            }
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": MUTATION, "variables": variables}
+        )
+
+        r.raise_for_status()
+        resp = r.json()
+
+        errors = resp.get("data", {}).get("productUpdate", {}).get("userErrors", [])
+        if errors:
+            print(f"Failed to restore {product_id}: {errors}")
+            continue
+
+        restored += 1
+        time.sleep(0.3)
+
+    print(f"Reactivated {restored} products.")
 
 
 def update_inventory(updates, location_gid, batch_size=250):
@@ -501,6 +624,7 @@ def build_product_groups(inventory_map):
             products[product_id] = {
                 "title": data["title"],
                 "vendor": vendor,
+                "status": data.get("status", ""), 
                 "skus": []
             }
 
@@ -577,7 +701,7 @@ def main():
     inventory_map = fetch_inventory_items()
 
     # =========================================================
-    # === STOCK UPDATE FLOW ====================================
+    # STOCK UPDATE FLOW
     # =========================================================
     updates, archive_candidates = read_csv(downloaded_file, inventory_map)
 
@@ -587,12 +711,12 @@ def main():
         print("No SKUs to update.")
 
     # =========================================================
-    # === CSV SKU SET ==========================================
+    # CSV SKU SET
     # =========================================================
     csv_skus = extract_csv_skus(downloaded_file)
 
     # =========================================================
-    # === SKU CLEANUP (MISSING FROM FILE → STOCK = 0) =========
+    # CLEANUP (EKKIA ONLY)
     # =========================================================
     ekkia_missing_skus = [
         {
@@ -611,7 +735,7 @@ def main():
     remove_missing_skus(ekkia_missing_skus, location_gid)
 
     # =========================================================
-    # === PRODUCT GROUPING ====================================
+    # PRODUCT GROUPING
     # =========================================================
     products = build_product_groups(inventory_map)
 
@@ -619,44 +743,33 @@ def main():
     to_archive = []
 
     # =========================================================
-    # === BUILD ARCHIVE CANDIDATES ============================
+    # CODE 0 MAP
     # =========================================================
-
-    # map product_id → set of code 0 SKUs
     code0_by_product = {}
-
     for item in archive_candidates:
         code0_by_product.setdefault(item["product_id"], set()).add(item["sku"])
 
     # =========================================================
-    # === ARCHIVE LOGIC (EXACT ORIGINAL RULES) ================
+    # ARCHIVE LOGIC
     # =========================================================
     for product_id, data in products.items():
         skus = data["skus"]
-
         total_variants = len(skus)
 
         unavailable_count = 0
         available_count = 0
 
         for sku in skus:
-
-            # missing from CSV = unavailable
             if sku not in csv_skus:
                 unavailable_count += 1
                 continue
 
-            # code 0 = unavailable
             if sku in code0_by_product.get(product_id, set()):
                 unavailable_count += 1
                 continue
 
-            # otherwise valid stock
             available_count += 1
 
-        # -------------------------
-        # RULE A: all variants unavailable
-        # -------------------------
         if unavailable_count == total_variants:
             to_archive.append({
                 "product_id": product_id,
@@ -667,9 +780,6 @@ def main():
             })
             continue
 
-        # -------------------------
-        # RULE B: 5+ variants rule
-        # -------------------------
         if total_variants >= MIN_VARIANTS_THRESHOLD and available_count == 1:
             to_archive.append({
                 "product_id": product_id,
@@ -680,55 +790,44 @@ def main():
             })
 
     # =========================================================
-    # === DEDUPLICATION ========================================
+    # DEDUP
     # =========================================================
     seen = set()
-    unique_to_archive = []
-
-    for item in to_archive:
-        if item["product_id"] not in seen:
-            seen.add(item["product_id"])
-            unique_to_archive.append(item)
-
-    to_archive = unique_to_archive
+    to_archive = [x for x in to_archive if not (x["product_id"] in seen or seen.add(x["product_id"]))]
 
     # =========================================================
-    # === DRY RUN OUTPUT =======================================
+    # DRY RUN
     # =========================================================
-    total_products = len(to_archive)
-
-    total_missing_variants = sum(
-        p["total"] - p["active"] for p in to_archive
-    )
-
-    all_unavailable = sum(
-        1 for p in to_archive if p["reason"] == "all_unavailable"
-    )
-
-    single_variant_products = sum(
-        1 for p in to_archive if p["reason"] == "single_variant_remaining"
-    )
-
     print("\n=== PRODUCT ARCHIVE DRY RUN ===")
-    print(f"Products flagged for archive: {total_products}")
-    print(f"Products fully unavailable: {all_unavailable}")
-    print(f"Products with single variant remaining: {single_variant_products}")
-    print(f"Total missing/unavailable variants: {total_missing_variants}")
+    print(f"Products flagged for archive: {len(to_archive)}")
     print("================================\n")
 
     # =========================================================
-    # === SAFETY CHECK =========================================
+    # ARCHIVE EXECUTION
     # =========================================================
-    SAFETY_ARCHIVE_LIMIT = 500
-
-    if total_products > SAFETY_ARCHIVE_LIMIT:
-        print("\n🚨 SAFETY CHECK FAILED — ARCHIVE SKIPPED")
-        print(f"Attempted to archive: {total_products}")
-        print(f"Limit: {SAFETY_ARCHIVE_LIMIT}")
-        print("No products were archived.\n")
+    if len(to_archive) <= 500:
+        archive_products(to_archive, dry_run=False)
     else:
-        RUN_ARCHIVE = True
-        archive_products(to_archive, dry_run=not RUN_ARCHIVE)
+        print("🚨 SAFETY CHECK FAILED — ARCHIVE SKIPPED")
+
+    # =========================================================
+    # REACTIVATION
+    # =========================================================
+    archived_products = evaluate_archived_products_for_reactivation(
+        products,
+        csv_skus,
+        code0_by_product,
+        min_large_product=5
+    )
+
+    print("\n=== PRODUCT REACTIVATION DRY RUN ===")
+    print(f"Products eligible for reactivation: {len(archived_products)}")
+    print("====================================\n")
+
+    if len(archived_products) <= 200:
+        unarchive_products(archived_products, dry_run=False)
+    else:
+        print("🚨 SAFETY CHECK FAILED — RESTORE SKIPPED")
 
 
 if __name__ == "__main__":
