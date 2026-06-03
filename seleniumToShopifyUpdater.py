@@ -88,6 +88,8 @@ def setup_driver():
     )
 
 
+
+
 # === DOWNLOAD ===
 def download_latest_file():
     from selenium.common.exceptions import StaleElementReferenceException
@@ -293,47 +295,70 @@ def fetch_inventory_items():
     return inventory_map
 
 
-# === CSV ===
 def read_csv(input_file, valid_skus):
     updates = []
+    archive_candidates = []
     skipped = 0
+
+    def map_stock_code(code: int):
+        mapping = {
+            3: {"quantity": 4, "archive": False},  # available
+            2: {"quantity": 2, "archive": False},  # low stock
+            1: {"quantity": 0, "archive": False},  # out of stock (DO NOT ARCHIVE)
+            0: {"quantity": 0, "archive": True},   # unavailable → archive signal
+        }
+        return mapping.get(code, {"quantity": 0, "archive": False})
 
     with open(input_file, "rb") as f:
         raw = f.read()
 
     encoding = chardet.detect(raw)["encoding"] or "utf-8"
-    sample = raw[:2048].decode(encoding, errors="replace")
 
-    if sample.count(";") > sample.count(","):
-        sep = ";"
-    elif sample.count("\t") > sample.count(","):
-        sep = "\t"
-    else:
-        sep = ","
-
-    df = pd.read_csv(StringIO(raw.decode(encoding, errors="replace")),
-                     sep=sep, header=None)
+    df = pd.read_csv(
+        StringIO(raw.decode(encoding, errors="replace")),
+        sep=None,
+        engine="python",
+        header=None
+    )
 
     for _, row in df.iterrows():
         sku = str(row[0]).strip()
 
         try:
-            qty = int(row[1])
+            code = int(row[1])
         except Exception:
-            qty = None
+            code = None
 
-        if sku in valid_skus and qty is not None:
+        if sku in valid_skus and code is not None:
+            mapped = map_stock_code(code)
+
+            product_id = valid_skus[sku]["product_id"]
+
+            # ------------------------------------
+            # STOCK UPDATE (ONLY RESPONSIBILITY)
+            # ------------------------------------
             updates.append({
                 "sku": sku,
-                "quantity": qty,
+                "quantity": mapped["quantity"],
                 "inventoryItemId": valid_skus[sku]["inventoryItemId"]
             })
+
+            # ------------------------------------
+            # ARCHIVE SIGNAL (ONLY CODE 0)
+            # ------------------------------------
+            if code == 0:
+                archive_candidates.append({
+                    "product_id": product_id,
+                    "sku": sku
+                })
+
         else:
             skipped += 1
 
     print(f"Prepared {len(updates)} updates, skipped {skipped}.")
-    return updates
+    print(f"Code 0 archive signals: {len(archive_candidates)}")
 
+    return updates, archive_candidates
 
 # === UPDATE ===
 MUTATION = """
@@ -483,40 +508,7 @@ def build_product_groups(inventory_map):
 
     return products
 
-def evaluate_products(products, csv_skus, min_variants_threshold=5):
-    to_archive = []
 
-    for product_id, data in products.items():
-        skus = data["skus"]
-
-        total_variants = len(skus)
-        active_variants = sum(1 for s in skus if s in csv_skus)
-
-        # RULE A: all variants missing
-        if active_variants == 0:
-            to_archive.append({
-                "product_id": product_id,
-                "product": data["title"],
-                "reason": "all_variants_missing",
-                "total": total_variants,
-                "active": active_variants
-            })
-            continue
-
-        # RULE B: only 1 variant left but product is large enough
-        if (
-            active_variants == 1
-            and total_variants >= min_variants_threshold
-        ):
-            to_archive.append({
-                "product_id": product_id,
-                "product": data["title"],
-                "reason": "single_variant_remaining",
-                "total": total_variants,
-                "active": active_variants
-            })
-
-    return to_archive
 
 def archive_products(to_archive, dry_run=True):
     """
@@ -577,8 +569,6 @@ def archive_products(to_archive, dry_run=True):
 
     print(f"Archived {archived_count} products.")
 
-
-# === MAIN ===
 def main():
     downloaded_file = download_latest_file()
     print(f"Using file: {downloaded_file}")
@@ -586,8 +576,10 @@ def main():
     location_gid = get_location_id()
     inventory_map = fetch_inventory_items()
 
-    # === SKU UPDATE FLOW (UNCHANGED) ===
-    updates = read_csv(downloaded_file, inventory_map)
+    # =========================================================
+    # === STOCK UPDATE FLOW ====================================
+    # =========================================================
+    updates, archive_candidates = read_csv(downloaded_file, inventory_map)
 
     if updates:
         update_inventory(updates, location_gid)
@@ -595,14 +587,13 @@ def main():
         print("No SKUs to update.")
 
     # =========================================================
-    # === NEW LOGIC: SKU CLEANUP + PRODUCT ARCHIVING ==========
+    # === CSV SKU SET ==========================================
     # =========================================================
-
     csv_skus = extract_csv_skus(downloaded_file)
 
-    # -----------------------------
-    # SKU-LEVEL CLEANUP (EKKIA)
-    # -----------------------------
+    # =========================================================
+    # === SKU CLEANUP (MISSING FROM FILE → STOCK = 0) =========
+    # =========================================================
     ekkia_missing_skus = [
         {
             "sku": sku,
@@ -618,29 +609,100 @@ def main():
     print("====================================\n")
 
     remove_missing_skus(ekkia_missing_skus, location_gid)
-    
-    # -----------------------------
-    # PRODUCT GROUPING
-    # -----------------------------
+
+    # =========================================================
+    # === PRODUCT GROUPING ====================================
+    # =========================================================
     products = build_product_groups(inventory_map)
 
-    to_archive = evaluate_products(
-        products,
-        csv_skus,
-        min_variants_threshold=5
-    )
+    MIN_VARIANTS_THRESHOLD = 5
+    to_archive = []
 
-    # -----------------------------
-    # PRODUCT ARCHIVE DRY RUN
-    # -----------------------------
+    # =========================================================
+    # === BUILD ARCHIVE CANDIDATES ============================
+    # =========================================================
+
+    # map product_id → set of code 0 SKUs
+    code0_by_product = {}
+
+    for item in archive_candidates:
+        code0_by_product.setdefault(item["product_id"], set()).add(item["sku"])
+
+    # =========================================================
+    # === ARCHIVE LOGIC (EXACT ORIGINAL RULES) ================
+    # =========================================================
+    for product_id, data in products.items():
+        skus = data["skus"]
+
+        total_variants = len(skus)
+
+        unavailable_count = 0
+        available_count = 0
+
+        for sku in skus:
+
+            # missing from CSV = unavailable
+            if sku not in csv_skus:
+                unavailable_count += 1
+                continue
+
+            # code 0 = unavailable
+            if sku in code0_by_product.get(product_id, set()):
+                unavailable_count += 1
+                continue
+
+            # otherwise valid stock
+            available_count += 1
+
+        # -------------------------
+        # RULE A: all variants unavailable
+        # -------------------------
+        if unavailable_count == total_variants:
+            to_archive.append({
+                "product_id": product_id,
+                "product": data["title"],
+                "reason": "all_unavailable",
+                "total": total_variants,
+                "active": 0
+            })
+            continue
+
+        # -------------------------
+        # RULE B: 5+ variants rule
+        # -------------------------
+        if total_variants >= MIN_VARIANTS_THRESHOLD and available_count == 1:
+            to_archive.append({
+                "product_id": product_id,
+                "product": data["title"],
+                "reason": "single_variant_remaining",
+                "total": total_variants,
+                "active": available_count
+            })
+
+    # =========================================================
+    # === DEDUPLICATION ========================================
+    # =========================================================
+    seen = set()
+    unique_to_archive = []
+
+    for item in to_archive:
+        if item["product_id"] not in seen:
+            seen.add(item["product_id"])
+            unique_to_archive.append(item)
+
+    to_archive = unique_to_archive
+
+    # =========================================================
+    # === DRY RUN OUTPUT =======================================
+    # =========================================================
     total_products = len(to_archive)
 
     total_missing_variants = sum(
         p["total"] - p["active"] for p in to_archive
     )
 
-    all_missing_products = sum(
-        1 for p in to_archive if p["reason"] == "all_variants_missing"
+    all_unavailable = sum(
+        1 for p in to_archive if p["reason"] == "all_unavailable"
     )
 
     single_variant_products = sum(
@@ -649,23 +711,23 @@ def main():
 
     print("\n=== PRODUCT ARCHIVE DRY RUN ===")
     print(f"Products flagged for archive: {total_products}")
-    print(f"Products with ALL variants missing: {all_missing_products}")
-    print(f"Products with SINGLE variant remaining: {single_variant_products}")
-    print(f"Total missing variants (across flagged products): {total_missing_variants}")
+    print(f"Products fully unavailable: {all_unavailable}")
+    print(f"Products with single variant remaining: {single_variant_products}")
+    print(f"Total missing/unavailable variants: {total_missing_variants}")
     print("================================\n")
 
-    # -----------------------------
-    # OPTIONAL EXECUTION SWITCH
-    # -----------------------------
-    SAFETY_ARCHIVE_LIMIT = 500  # <-- set your limit here
+    # =========================================================
+    # === SAFETY CHECK =========================================
+    # =========================================================
+    SAFETY_ARCHIVE_LIMIT = 500
 
     if total_products > SAFETY_ARCHIVE_LIMIT:
         print("\n🚨 SAFETY CHECK FAILED — ARCHIVE SKIPPED")
-        print(f"Attempted to archive: {total_products} products")
+        print(f"Attempted to archive: {total_products}")
         print(f"Limit: {SAFETY_ARCHIVE_LIMIT}")
         print("No products were archived.\n")
     else:
-        RUN_ARCHIVE = True
+        RUN_ARCHIVE = False
         archive_products(to_archive, dry_run=not RUN_ARCHIVE)
 
 
