@@ -376,6 +376,99 @@ def archive_products(to_archive):
     print(f"Archived products: {archived}")
 
 
+def build_archived_product_groups(inventory_map):
+    products = {}
+
+    for sku, data in inventory_map.items():
+        if not is_eldorado_product(data.get("vendor", "")):
+            continue
+
+        product_id = data.get("product_id")
+        if not product_id:
+            continue
+
+        # ONLY archived products
+        if data.get("status", "").upper() != "ARCHIVED":
+            continue
+
+        if product_id not in products:
+            products[product_id] = {
+                "title": data["title"],
+                "skus": []
+            }
+
+        products[product_id]["skus"].append(sku)
+
+    return products
+
+
+def evaluate_archived_products_for_reactivation(products, csv_skus):
+    to_unarchive = []
+
+    for product_id, data in products.items():
+        skus = data["skus"]
+        total_variants = len(skus)
+
+        active_variants = sum(1 for s in skus if s in csv_skus)
+
+        # SMALL PRODUCT
+        if total_variants < 5:
+            if active_variants >= 1:
+                to_unarchive.append({
+                    "product_id": product_id,
+                    "title": data["title"],
+                    "total": total_variants,
+                    "active": active_variants,
+                    "reason": "small_product_recovery"
+                })
+
+        # LARGE PRODUCT
+        else:
+            if active_variants >= 2:
+                to_unarchive.append({
+                    "product_id": product_id,
+                    "title": data["title"],
+                    "total": total_variants,
+                    "active": active_variants,
+                    "reason": "large_product_recovery"
+                })
+
+    return to_unarchive
+
+def unarchive_products(to_unarchive):
+    MUTATION = """
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product { id status }
+        userErrors { field message }
+      }
+    }
+    """
+
+    restored = 0
+
+    for p in to_unarchive:
+        print(f"Restoring: {p['title']} ({p['active']}/{p['total']})")
+
+        variables = {
+            "input": {
+                "id": p["product_id"],
+                "status": "ACTIVE"
+            }
+        }
+
+        r = requests.post(
+            API_GRAPHQL,
+            headers=HEADERS_GRAPHQL,
+            json={"query": MUTATION, "variables": variables}
+        )
+
+        r.raise_for_status()
+        restored += 1
+        time.sleep(0.3)
+
+    print(f"Reactivated products: {restored}")
+
 
 
 # --- Main ---
@@ -448,6 +541,25 @@ def main():
     else:
         if RUN_ARCHIVE:
             archive_products(to_archive)
+
+    # =========================
+    # REACTIVATION FLOW
+    # =========================
+
+    archived_products = build_archived_product_groups(inventory_map)
+
+    to_unarchive = evaluate_archived_products_for_reactivation(
+        archived_products,
+        csv_skus
+    )
+
+    print("\n=== PRODUCT REACTIVATION DRY RUN (ELDORADO) ===")
+    print(f"Products eligible for reactivation: {len(to_unarchive)}")
+    print("==============================================\n")
+
+    RUN_UNARCHIVE = True
+    if RUN_UNARCHIVE and len(to_unarchive) <= 200:
+        unarchive_products(to_unarchive)
 
 if __name__ == "__main__":
     main()
