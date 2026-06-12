@@ -603,6 +603,36 @@ def remove_missing_skus(missing_skus, location_gid):
 
 from collections import defaultdict
 
+def build_archived_product_groups(inventory_map):
+    products = {}
+
+    for sku, data in inventory_map.items():
+        vendor = data.get("vendor", "")
+        product_id = data.get("product_id")
+
+        if not is_ekkia_product(vendor):
+            continue
+
+        if not product_id:
+            continue
+
+        # ONLY archived products this time
+        if str(data.get("status", "")).upper() != "ARCHIVED":
+            continue
+
+        if product_id not in products:
+            products[product_id] = {
+                "title": data["title"],
+                "vendor": vendor,
+                "status": data.get("status", ""),
+                "skus": []
+            }
+
+        products[product_id]["skus"].append(sku)
+
+    return products
+
+
 def build_product_groups(inventory_map):
     products = {}
 
@@ -813,8 +843,11 @@ def main():
     # =========================================================
     # REACTIVATION
     # =========================================================
+    raw_archived_products = build_archived_product_groups(inventory_map)
+    if not raw_archived_products:
+        print("No archived products found")
     archived_products = evaluate_archived_products_for_reactivation(
-        products,
+        raw_archived_products,
         csv_skus,
         code0_by_product,
         min_large_product=5
