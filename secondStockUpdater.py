@@ -256,14 +256,14 @@ def update_inventory(updates, location_gid, batch_size=250):
 
     print(f"\nInventory update complete. {total_updated} updated, {total_errors} errors.")
 
-def find_missing_eldorado_skus(inventory_map, csv_skus):
+def find_missing_eldorado_skus(inventory_map, csv_stock):
     missing = []
 
     for sku, data in inventory_map.items():
         if not is_eldorado_product(data.get("vendor", "")):
             continue
 
-        if sku not in csv_skus:
+        if sku not in csv_stock or csv_stock.get(sku, 0) <= 0:
             missing.append({
                 "sku": sku,
                 "inventoryItemId": data["inventoryItemId"],
@@ -298,14 +298,17 @@ def build_product_groups(inventory_map):
 
     return products
 
-def evaluate_products(products, csv_skus, min_variants_threshold=5):
+def evaluate_products(products, csv_stock, min_variants_threshold=5):
     to_archive = []
 
     for product_id, data in products.items():
         skus = data["skus"]
 
         total_variants = len(skus)
-        active_variants = sum(1 for s in skus if s in csv_skus)
+        active_variants = sum(
+            1 for s in skus
+            if s in csv_stock and csv_stock[s] > 0
+        )
 
         # CASE 1: all missing
         if active_variants == 0:
@@ -402,14 +405,17 @@ def build_archived_product_groups(inventory_map):
     return products
 
 
-def evaluate_archived_products_for_reactivation(products, csv_skus):
+def evaluate_archived_products_for_reactivation(products, csv_stock):
     to_unarchive = []
 
     for product_id, data in products.items():
         skus = data["skus"]
         total_variants = len(skus)
 
-        active_variants = sum(1 for s in skus if s in csv_skus)
+        active_variants = sum(
+            1 for s in skus
+            if s in csv_stock and csv_stock[s] > 0
+        )
 
         # SMALL PRODUCT
         if total_variants < 5:
@@ -492,12 +498,26 @@ def main():
     # CSV SKUs
     # -------------------------
     df = pd.read_csv(input_file, header=None)
-    csv_skus = set(df[0].astype(str).str.strip().str.upper())
+
+    csv_stock = {}
+
+    for _, row in df.iterrows():
+        sku = str(row[0]).strip().upper()
+
+        try:
+            qty = int(row[2])
+        except Exception:
+            continue
+
+        if qty is None or qty < 0:
+            continue
+
+        csv_stock[sku] = qty
 
     # =========================================================
     # SKU CLEANUP DRY RUN (ELDORADO)
     # =========================================================
-    missing_skus = find_missing_eldorado_skus(inventory_map, csv_skus)
+    missing_skus = find_missing_eldorado_skus(inventory_map, csv_stock)
 
     total_missing_skus = len(missing_skus)
 
@@ -515,7 +535,7 @@ def main():
     # =========================================================
     products = build_product_groups(inventory_map)
 
-    to_archive = evaluate_products(products, csv_skus)
+    to_archive = evaluate_products(products, csv_stock)
 
     total_products = len(to_archive)
 
@@ -550,7 +570,7 @@ def main():
 
     to_unarchive = evaluate_archived_products_for_reactivation(
         archived_products,
-        csv_skus
+        csv_stock
     )
 
     print("\n=== PRODUCT REACTIVATION DRY RUN (ELDORADO) ===")
