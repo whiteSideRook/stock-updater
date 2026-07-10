@@ -44,6 +44,7 @@ BRAND_TO_PRODUCER = {
     "RIDING WORLD": "Ekkia",
     "FLECK": "Ekkia",
     "LISTER": "Ekkia",
+    "EFFOL": "Ekkia",
     "PADDOCK SPORTS": "Ekkia"
 }
 
