@@ -35,6 +35,7 @@ BRAND_TO_PRODUCER = {
     "FEELING": "Ekkia",
     "HEINIGER": "Ekkia",
     "LEOVET": "Ekkia",
+    "METALAB": "Ekkia",
     "NACA": "Ekkia",
     "NAF": "Ekkia",
     "NORTON": "Ekkia",
