@@ -42,6 +42,7 @@ BRAND_TO_PRODUCER = {
     "PADDOCK": "Ekkia",
     "PENELOPE": "Ekkia",
     "PENELOPE COLLECTIONS": "Ekkia",
+    "PRO SERIES": "Ekkia",
     "RIDING WORLD": "Ekkia",
     "FLECK": "Ekkia",
     "LISTER": "Ekkia",
