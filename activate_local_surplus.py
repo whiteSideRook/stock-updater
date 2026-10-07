@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-STATE_FILE = Path("ongoing_state.json")
+STATE_FILE = Path(os.getenv("ONGOING_STATE_FILE", "ongoing_state.json"))
 
 
 def require_env(name: str) -> str:
@@ -39,44 +39,40 @@ def graphql(query: str, variables: dict | None = None) -> dict:
     response.raise_for_status()
     payload = response.json()
     if payload.get("errors"):
-        raise RuntimeError(f"Shopify GraphQL errors: {payload['errors']}")
+        raise RuntimeError("Shopify GraphQL returned an error.")
     return payload["data"]
 
 
-def load_surplus_skus() -> dict[str, float]:
+def load_surplus_skus() -> set[str]:
     if not STATE_FILE.exists():
-        raise RuntimeError(f"{STATE_FILE} does not exist.")
+        raise RuntimeError("Ongoing state file is missing.")
 
     state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
 
     if state.get("schema_version") != 2:
-        raise RuntimeError(
-            f"Unsupported ongoing_state schema: {state.get('schema_version')!r}"
-        )
+        raise RuntimeError("Unsupported Ongoing state schema.")
     if state.get("safe_for_shopify") is not True:
-        raise RuntimeError("ongoing_state.json is not marked safe_for_shopify.")
+        raise RuntimeError("Ongoing state is not marked safe_for_shopify.")
 
     raw = state.get("derived", {}).get("local_surplus_by_sku")
     if not isinstance(raw, dict):
-        raise RuntimeError("local_surplus_by_sku is missing from ongoing_state.json.")
+        raise RuntimeError("local_surplus_by_sku is missing from Ongoing state.")
 
-    result = {}
-    for sku, qty in raw.items():
-        try:
-            qty_num = float(qty)
-        except (TypeError, ValueError):
-            continue
-        sku_norm = str(sku).strip().upper()
-        if sku_norm and qty_num > 0:
-            result[sku_norm] = qty_num
-    return result
+    return {
+        str(sku).strip().upper()
+        for sku, qty in raw.items()
+        if str(sku).strip() and _positive(qty)
+    }
 
 
-def fetch_archived_products() -> dict[str, dict]:
-    """
-    Uses the same Shopify product/status/variant fields already used by the
-    existing stock scripts. Only ARCHIVED products are retained locally.
-    """
+def _positive(value) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def fetch_archived_products() -> dict[str, set[str]]:
     products = {}
     cursor = None
 
@@ -87,12 +83,9 @@ def fetch_archived_products() -> dict[str, dict]:
         edges {
           node {
             id
-            title
             status
             variants(first:100) {
-              edges {
-                node { sku }
-              }
+              edges { node { sku } }
             }
           }
         }
@@ -114,10 +107,7 @@ def fetch_archived_products() -> dict[str, dict]:
                 for v in product["variants"]["edges"]
                 if str(v["node"].get("sku") or "").strip()
             }
-            products[product["id"]] = {
-                "title": product["title"],
-                "skus": skus,
-            }
+            products[product["id"]] = skus
 
         page = connection["pageInfo"]
         if not page["hasNextPage"]:
@@ -128,7 +118,7 @@ def fetch_archived_products() -> dict[str, dict]:
     return products
 
 
-def activate_product(product_id: str):
+def activate_product(product_id: str) -> None:
     mutation = """
     mutation productUpdate($input: ProductInput!) {
       productUpdate(input: $input) {
@@ -137,64 +127,38 @@ def activate_product(product_id: str):
       }
     }
     """
-    data = graphql(
-        mutation,
-        {"input": {"id": product_id, "status": "ACTIVE"}},
-    )
+    data = graphql(mutation, {"input": {"id": product_id, "status": "ACTIVE"}})
     result = data["productUpdate"]
-    errors = result.get("userErrors") or []
-    if errors:
-        raise RuntimeError(f"Could not activate {product_id}: {errors}")
-
-    product = result.get("product") or {}
-    if str(product.get("status", "")).upper() != "ACTIVE":
-        raise RuntimeError(
-            f"Shopify did not confirm ACTIVE status for {product_id}: {product}"
-        )
+    if result.get("userErrors"):
+        raise RuntimeError("Shopify rejected a product activation.")
+    if str((result.get("product") or {}).get("status", "")).upper() != "ACTIVE":
+        raise RuntimeError("Shopify did not confirm ACTIVE status.")
 
 
-def main():
-    surplus = load_surplus_skus()
-    print(f"Local-surplus SKUs (>0): {len(surplus)}")
+def main() -> None:
+    surplus_skus = load_surplus_skus()
+    print(f"Local-surplus SKUs available for protection: {len(surplus_skus)}")
 
-    if not surplus:
+    if not surplus_skus:
         print("No local surplus. Nothing to reactivate.")
         return
 
     archived = fetch_archived_products()
-    print(f"Archived Shopify products inspected: {len(archived)}")
+    candidates = [
+        product_id
+        for product_id, product_skus in archived.items()
+        if product_skus & surplus_skus
+    ]
 
-    candidates = []
-    matched_surplus_skus = set()
+    print(f"Archived products inspected: {len(archived)}")
+    print(f"Archived products eligible for reactivation: {len(candidates)}")
 
-    for product_id, product in archived.items():
-        matches = sorted(product["skus"] & surplus.keys())
-        if not matches:
-            continue
-
-        matched_surplus_skus.update(matches)
-        candidates.append({
-            "product_id": product_id,
-            "title": product["title"],
-            "matches": [(sku, surplus[sku]) for sku in matches],
-        })
-
-    print(f"Archived products with local surplus: {len(candidates)}")
-
-    if not candidates:
-        print("Nothing to reactivate.")
-        return
-
-    for item in candidates:
-        match_text = ", ".join(
-            f"{sku} (surplus {qty:g})" for sku, qty in item["matches"]
-        )
-        print(f"Activating: {item['title']} — {match_text}")
-        activate_product(item["product_id"])
+    for product_id in candidates:
+        activate_product(product_id)
         time.sleep(0.3)
 
     print(f"Reactivated {len(candidates)} archived products.")
-    print("Inventory quantities were NOT modified.")
+    print("No inventory quantities were modified.")
 
 
 if __name__ == "__main__":

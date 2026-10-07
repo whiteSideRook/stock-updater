@@ -25,7 +25,7 @@ ONGOING_USERNAME = require_env("ONGOING_USERNAME")
 ONGOING_PASSWORD = require_env("ONGOING_PASSWORD")
 ONGOING_GOODS_OWNER_ID = require_env("ONGOING_GOODS_OWNER_ID")
 
-STATE_FILE = Path("ongoing_state.json")
+STATE_FILE = Path(os.getenv("ONGOING_STATE_FILE", "ongoing_state.json"))
 MAX_ITEMS = 1000
 OVERLAP_MINUTES = 5
 
