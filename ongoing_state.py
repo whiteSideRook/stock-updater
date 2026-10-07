@@ -435,8 +435,10 @@ def incremental(state: dict, query_started: str) -> dict:
     return state
 
 
-def save_atomic(state: dict):
-    tmp = STATE_FILE.with_suffix(".json.tmp")
+def save_atomic(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
 
