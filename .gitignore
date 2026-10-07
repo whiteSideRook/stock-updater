@@ -3,3 +3,4 @@ __pycache__/
 .env
 *.log
 ongoing_state.json
+.private_state/
