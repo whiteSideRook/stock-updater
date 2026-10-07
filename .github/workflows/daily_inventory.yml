@@ -1,9 +1,16 @@
-name: Daily Shopify Inventory Updates 
+name: Daily Shopify Inventory Updates
+
+permissions:
+  contents: write
 
 on:
   schedule:
     - cron: '0 9 * * *' # AM
   workflow_dispatch:
+
+concurrency:
+  group: daily-shopify-inventory
+  cancel-in-progress: false
 
 jobs:
   update_inventory:
@@ -23,6 +30,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas chardet selenium webdriver-manager
 
+      - name: Refresh Ongoing checkpoint
+        run: python ongoing_state.py
+        env:
+          ONGOING_BASE_URL: ${{ secrets.ONGOING_BASE_URL }}
+          ONGOING_USERNAME: ${{ secrets.ONGOING_USERNAME }}
+          ONGOING_PASSWORD: ${{ secrets.ONGOING_PASSWORD }}
+          ONGOING_GOODS_OWNER_ID: ${{ secrets.ONGOING_GOODS_OWNER_ID }}
+
       - name: Run Selenium to Shopify updater
         run: python seleniumToShopifyUpdater.py
         env:
@@ -40,3 +55,23 @@ jobs:
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FILENAME: ${{ secrets.FILENAME }}
+
+      - name: Reactivate archived products with local surplus
+        run: python activate_local_surplus.py
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+
+      # Commit only after every preceding step succeeds. If a stock updater or
+      # activation fails, the checkpoint is not advanced in Git.
+      - name: Commit Ongoing checkpoint
+        run: |
+          if git diff --quiet -- ongoing_state.json; then
+            echo "No checkpoint changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ongoing_state.json
+          git commit -m "Update Ongoing inventory checkpoint"
+          git push
