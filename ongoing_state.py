@@ -443,20 +443,64 @@ def save_atomic(state):
     tmp.replace(STATE_FILE)
 
 
+def checkpoint_requires_bootstrap(state: dict) -> bool:
+    """
+    Ongoing only permits stockInfoChangedFrom within the last 24 hours.
+    Use a 23-hour threshold to allow for the five-minute overlap,
+    execution delays, and clock differences.
+    """
+    if state.get("schema_version") != 2:
+        return True
+
+    watermark = state.get("watermarks", {}).get("inventory")
+    if not watermark:
+        return True
+
+    try:
+        last_sync = datetime.fromisoformat(
+            watermark.replace("Z", "+00:00")
+        )
+
+        if last_sync.tzinfo is None:
+            return True
+
+        age = datetime.now(timezone.utc) - last_sync
+
+        return age >= timedelta(hours=23)
+
+    except (ValueError, TypeError, OverflowError):
+        return True
+
+
 def main():
     query_started = iso_now()
+
     if STATE_FILE.exists():
-        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        state = incremental(state, query_started)
+        state = json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+
+        if checkpoint_requires_bootstrap(state):
+            print(
+                "Inventory checkpoint expired or invalid "
+                "— performing full bootstrap."
+            )
+            state = bootstrap(query_started)
+        else:
+            state = incremental(state, query_started)
+
     else:
         state = bootstrap(query_started)
 
     save_atomic(state)
+
     d = state["derived"]
+
     print()
     print("=" * 72)
     print("ONGOING STATE CHECKPOINT COMPLETE — READ ONLY AGAINST ONGOING")
     print("=" * 72)
+
     print(f"Stored inventory records: {len(state['records']['inventory'])}")
     print(f"Stored active orders:     {len(state['records']['customer_orders'])}")
     print(f"Stored active POs:        {len(state['records']['purchase_orders'])}")
@@ -465,6 +509,7 @@ def main():
     print(f"SKUs with incoming:       {len(d['incoming_by_sku'])}")
     print(f"SKUs with local surplus:  {len(d['local_surplus_by_sku'])}")
     print(f"Wrote: {STATE_FILE.resolve()}")
+
     print("No Shopify calls were made. No Ongoing data was modified.")
 
 
