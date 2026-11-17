@@ -34,6 +34,7 @@ BRAND_TO_PRODUCER = {
     "ERIC THOMAS": "Ekkia",
     "FEELING": "Ekkia",
     "HEINIGER": "Ekkia",
+    "K BY EQUITHEME": "Ekkia",
     "LEOVET": "Ekkia",
     "METALAB": "Ekkia",
     "NACA": "Ekkia",
