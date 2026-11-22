@@ -45,7 +45,8 @@ class Shopify:
                     v=ve['node']; sku=str(v.get('sku') or '').strip().upper()
                     if not sku: continue
                     if not v.get('inventoryItem'): raise RuntimeError(f'Missing inventory item for {sku}')
-                    if sku in self.inventory: raise RuntimeError(f'Duplicate Shopify SKU: {sku}')
+                    # Match legacy supplier scripts: duplicate SKUs overwrite earlier entries.
+                    # The last variant encountered for a SKU is used for inventory updates.
                     skus.add(sku)
                     self.inventory[sku]={'inventoryItemId':v['inventoryItem']['id'],'title':p['title'],'vendor':p.get('vendor',''),'product_id':pid,'status':p['status']}
                 self.products[pid]={'status':p['status'],'skus':skus}
@@ -83,7 +84,10 @@ class Shopify:
                 raise RuntimeError(f'Shopify did not confirm {new_status} for {product_id}: {result}')
         self.products[product_id]['status']=new_status
         for sku in self.products[product_id]['skus']:
-            self.inventory[sku]['status']=new_status
+            # A duplicate SKU may map to a different product (last variant wins).
+            # Do not change that other product's cached status.
+            if self.inventory[sku]['product_id'] == product_id:
+                self.inventory[sku]['status']=new_status
 
     def archived(self):
         return {pid:p['skus'] for pid,p in self.products.items() if p['status']=='ARCHIVED'}
