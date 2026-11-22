@@ -1,0 +1,33 @@
+{
+  "location": "gid://shopify/Location/1",
+  "inventory": {
+    "EK1": {
+      "inventoryItemId": "gid://shopify/InventoryItem/EK1",
+      "title": "EK1",
+      "vendor": "NORTON",
+      "product_id": "gid://shopify/Product/1",
+      "status": "ACTIVE"
+    },
+    "EK2": {
+      "inventoryItemId": "gid://shopify/InventoryItem/EK2",
+      "title": "EK2",
+      "vendor": "NORTON",
+      "product_id": "gid://shopify/Product/2",
+      "status": "ARCHIVED"
+    },
+    "EL1": {
+      "inventoryItemId": "gid://shopify/InventoryItem/EL1",
+      "title": "EL1",
+      "vendor": "CATAGO",
+      "product_id": "gid://shopify/Product/3",
+      "status": "ACTIVE"
+    },
+    "EL2": {
+      "inventoryItemId": "gid://shopify/InventoryItem/EL2",
+      "title": "EL2",
+      "vendor": "CATAGO",
+      "product_id": "gid://shopify/Product/4",
+      "status": "ARCHIVED"
+    }
+  }
+}
