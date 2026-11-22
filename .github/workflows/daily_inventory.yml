@@ -1,79 +1,98 @@
 name: Daily Shopify Inventory Updates
-
 on:
   schedule:
-    - cron: '0 9 * * *' # AM
+    - cron: '0 9 * * *'
   workflow_dispatch:
-
+    inputs:
+      mode:
+        description: 'Choose dry-run for review; live requires repository variable INVENTORY_LIVE_ENABLED=true'
+        type: choice
+        required: true
+        default: dry-run
+        options: [dry-run, live]
+permissions:
+  contents: read
+  actions: write
 concurrency:
   group: daily-shopify-inventory
   cancel-in-progress: false
-
 jobs:
   update_inventory:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+          cache: '' # avoid pip dependency cache accumulation
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests pandas chardet selenium webdriver-manager
-
-      # The checkpoint is stored in the Actions cache, not committed to this
-      # public repository. A cache miss is safe: ongoing_state.py bootstraps.
-      - name: Restore private Ongoing checkpoint
+        run: pip install -r requirements.txt
+      - name: Test offline
+        run: python -m unittest discover -s tests -v
+      - name: Restore Ongoing checkpoint
         uses: actions/cache/restore@v4
         with:
           path: .private_state/ongoing_state.json
           key: ongoing-state-${{ github.run_id }}
           restore-keys: |
             ongoing-state-
-
-      - name: Refresh Ongoing checkpoint
-        run: python ongoing_state.py
+      - name: Guard live execution
+        env:
+          LIVE_ENABLED: ${{ vars.INVENTORY_LIVE_ENABLED }}
+          MODE: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == "schedule" || "$MODE" == "live" ]]; then
+            if [[ "$LIVE_ENABLED" != "true" ]]; then
+              echo 'Live inventory is disabled. Set INVENTORY_LIVE_ENABLED=true after reviewing dry runs.'
+              exit 1
+            fi
+          fi
+      - name: Run inventory
         env:
           ONGOING_STATE_FILE: .private_state/ongoing_state.json
           ONGOING_BASE_URL: ${{ secrets.ONGOING_BASE_URL }}
           ONGOING_USERNAME: ${{ secrets.ONGOING_USERNAME }}
           ONGOING_PASSWORD: ${{ secrets.ONGOING_PASSWORD }}
           ONGOING_GOODS_OWNER_ID: ${{ secrets.ONGOING_GOODS_OWNER_ID }}
-
-      - name: Run Selenium to Shopify updater
-        run: python seleniumToShopifyUpdater.py
-        env:
           APP_URL: ${{ secrets.APP_URL }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
-          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
-
-      - name: Run second inventory script
-        run: python secondStockUpdater.py
-        env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FILENAME: ${{ secrets.FILENAME }}
-
-      - name: Reactivate archived products with local surplus
-        run: python activate_local_surplus.py
-        env:
-          ONGOING_STATE_FILE: .private_state/ongoing_state.json
-          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
-          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
-
-      # Save only after the complete stock/activation workflow succeeds.
-      - name: Save private Ongoing checkpoint
+          ALLOW_LIVE_INVENTORY: 'YES'
+          MODE: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == "schedule" || "$MODE" == "live" ]]; then
+            python daily_inventory.py --live --report inventory_report.json
+          else
+            python daily_inventory.py --report inventory_report.json
+          fi
+      - name: Save checkpoint after successful live run
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.mode == 'live') }}
         uses: actions/cache/save@v4
         with:
           path: .private_state/ongoing_state.json
           key: ongoing-state-${{ github.run_id }}
+      - name: Remove older Ongoing caches after successful live run
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.mode == 'live') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_KEY: ongoing-state-${{ github.run_id }}
+        run: |
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" --jq '.actions_caches[] | select(.key | startswith("ongoing-state-")) | [.id,.key] | @tsv' | while IFS=$'\t' read -r id key; do
+            if [[ "$key" != "$CURRENT_KEY" ]]; then
+              gh api -X DELETE "repos/$REPO/actions/caches/$id"
+            fi
+          done
+      - name: Report summary
+        if: always()
+        run: |
+          if [[ -f inventory_report.json ]]; then
+            python -c 'import json; x=json.load(open("inventory_report.json")); print("Mode:",x["mode"],"Shopify requests:",x["shopify_requests"],"Operations:",len(x["operations"])); print(x["summary"])'
+          fi
