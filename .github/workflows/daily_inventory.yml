@@ -1,7 +1,8 @@
 name: Daily Shopify Inventory Updates
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '17 9 * * *'
+      timezone: 'Europe/Stockholm'
   workflow_dispatch:
     inputs:
       mode:
